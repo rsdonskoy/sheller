@@ -38,8 +38,10 @@ sheller unpack packed.exe --stop esp+xfer \
 
 `report.json` is the event artifact: one `events` object whose `detail` is a single
 whole-run-ordered list of raw events and judgment events (module walks, clock probes,
-SMC crossings, ...), plus exact whole-run `counts`, the `stub_calls` side table and
-`loss`. The default level lists the semantic types, sample-code page reads/writes
+SMC crossings, ...), plus exact whole-run `counts`, the `stub_calls` side table, the
+`module_sources` provenance table (one row per resident system module - where its
+bytes came from; `[]` outside loader worlds) and `loss`. The default level lists the
+semantic types, sample-code page reads/writes
 into system DLLs and low-frequency judgments; `--event-level full` adds the
 window-side types (`block-exec`, `sample-code`, `smc-execute`) from the bounded
 ledger window and turns `loss` into counters. The same input replays to a
