@@ -1086,7 +1086,10 @@ std::vector<std::uint8_t> make_lstrlen_sample()
         {{"kernel32.dll", {"lstrlenA"}}, {"ntdll.dll", {"NtTerminateProcess"}}});
 }
 
+#if defined(_MSC_VER)
+#pragma warning(push)
 #pragma warning(disable : 4996) // getenv is fine in a test
+#endif
 TEST(LoaderDirectory, RealDllCorpusStringCallExecutesRealCode)
 {
     // the corpus directory gates the whole test: unset variables skip
@@ -1172,6 +1175,9 @@ TEST(LoaderDirectory, RealDllCorpusStringCallExecutesRealCode)
     // the exit code is the evidence the real body ran against guest memory
     EXPECT_EQ(run->exit_code, std::strlen(kRealString));
     fs::remove(sample_path, ec);
+#if defined(_MSC_VER)
+#pragma warning(pop)
+#endif
 }
 
 // Review regressions: public entry points and directory/replay contracts.

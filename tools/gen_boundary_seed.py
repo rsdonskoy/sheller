@@ -217,7 +217,10 @@ def main():
     lines.append("")
     lines.append("} // namespace sheller::engine::boundary_seed")
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    out_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    # newline='\n': the output is byte-pinned by the seed freshness test - a
+    # text-mode write would emit CRLF on Windows and break the Linux regen
+    with open(out_path, "w", encoding="utf-8", newline="\n") as handle:
+        handle.write("\n".join(lines) + "\n")
     print("wrote %s (%d modules)" % (out_path, len(blocks)))
     return 0
 
