@@ -16,6 +16,11 @@
 
 #include "render.h"
 
+#ifdef _WIN32
+#define NOMINMAX
+#include <windows.h>
+#endif
+
 #include <algorithm>
 #include <charconv>
 #include <cstdint>
@@ -358,23 +363,31 @@ int run_snapshot(const std::string& input, const std::vector<std::string>& rejec
                  const std::string& dump_dir, const EngineBounds& bounds,
                  const std::string& report_path, const sheller::cli::EventLevel event_level,
                  const bool from_snapshot, const std::string& save_snapshot,
-                 const bool guest_stdout)
+                 const bool guest_stdout, const std::string& system_modules_dir,
+                 const bool system_modules_fallback)
 {
     sheller::AnalysisOptions options;
+    if (!system_modules_dir.empty()) {
+        options.run.system_modules_dir = system_modules_dir;
+        options.run.system_modules_fallback = system_modules_fallback;
+    }
+    // Only the legacy non-Windows sample route requires a synthetic
+    // directory. Directory worlds and their snapshots are self-contained;
+    // locate the synthetic set opportunistically for explicit fallback.
+    const bool needs_synthetic =
 #ifndef _WIN32
-    // Sample construction needs the synthetic system module directory; a
-    // replayed capture container does not, and a replayed crafted container
-    // fails in the engine with its own explicit message when the directory is
-    // absent. Locate it once here so both routes share the same shape.
+        !from_snapshot && system_modules_dir.empty();
+#else
+        false; // plain Windows samples capture; strict directory worlds are self-contained
+#endif
     if (const auto synth = locate_synthetic_modules(); synth.has_value()) {
         options.run.synthetic_system_modules = true;
         options.run.synthetic_module_dir = *synth;
-    } else if (!from_snapshot) {
+    } else if (needs_synthetic) {
         std::cerr << "sheller run: synthetic modules not found (looked next to the "
                      "executable); build with synth_modules enabled\n";
         return 2;
     }
-#endif
     // The route is the flag's, never a guess about the bytes: without
     // --from-snapshot the positional goes to the sample route, and a snapshot
     // file there is refused as the capture-class failure the facade reports.
@@ -472,23 +485,35 @@ int run_snapshot(const std::string& input, const std::vector<std::string>& rejec
 // One-shot unpack: everything below the CLI is the facade's
 // unpack_sample pipeline. --keep preserves the intermediates by passing an
 // explicit work directory (the facade deletes the ones it generates).
-// The loader route (non-Windows hosts) needs the generated synthetic system
-// modules; they are located relative to the executable, exactly where the
-// build places them.
+// The loader route (non-Windows hosts) and the directory-mode crafted route
+// (every host) need the generated synthetic system modules; they are located
+// relative to the executable, exactly where the build places them.
 std::optional<fs::path> locate_synthetic_modules()
 {
     std::error_code ec;
-    auto exe = fs::path("/proc/self/exe");
+#ifdef _WIN32
+    char exe_path[MAX_PATH] = {};
+    if (GetModuleFileNameA(nullptr, exe_path, MAX_PATH) == 0) {
+        return std::nullopt;
+    }
+    fs::path exe(exe_path);
+#else
+    fs::path exe = fs::path("/proc/self/exe");
     if (fs::is_symlink(exe, ec)) {
         exe = fs::read_symlink(exe, ec);
         if (ec) {
             return std::nullopt;
         }
     }
-    // <build>/<config>/src/cli/sheller -> <build>/<config>/synth_modules,
-    // then a sibling of the executable as the fallback layout.
-    for (const auto& candidate : {exe.parent_path().parent_path().parent_path() / "synth_modules",
-                                  exe.parent_path() / "synth_modules"}) {
+#endif
+    // <build>/<config>/src/cli/sheller -> <build>/<config>/synth_modules
+    // (the single-config layout), the multi-config step up (<build>/<config>
+    // is four levels above the executable), then a sibling of the
+    // executable as the fallback layout.
+    for (const auto& candidate :
+         {exe.parent_path().parent_path().parent_path() / "synth_modules",
+          exe.parent_path().parent_path().parent_path().parent_path() / "synth_modules",
+          exe.parent_path() / "synth_modules"}) {
         if (fs::is_directory(candidate, ec)) {
             return candidate;
         }
@@ -499,7 +524,8 @@ std::optional<fs::path> locate_synthetic_modules()
 int run_unpack(std::string_view sample, std::string_view out_override, const bool keep,
                const bool shellcode, const sheller::cli::EventLevel event_level,
                const EngineBounds& bounds, const std::string& report_override,
-               const std::string& save_snapshot)
+               const std::string& save_snapshot, const std::string& system_modules_dir,
+               const bool system_modules_fallback)
 {
     const fs::path out =
         out_override.empty() ? fs::path(std::string(sample) + ".unp") : fs::path(out_override);
@@ -515,15 +541,26 @@ int run_unpack(std::string_view sample, std::string_view out_override, const boo
     if (!save_snapshot.empty()) {
         options.save_snapshot = save_snapshot;
     }
+    // Strict directory worlds need no synthetic set; legacy non-Windows
+    // construction does. Locate optional fallback modules on either host.
+    const bool unpack_needs_synthetic =
 #ifndef _WIN32
+        system_modules_dir.empty()
+#else
+        false
+#endif
+        ;
     if (const auto synth = locate_synthetic_modules(); synth.has_value()) {
         options.synthetic_module_dir = *synth;
-    } else {
+    } else if (unpack_needs_synthetic) {
         std::cerr << "sheller unpack: synthetic modules not found (looked next to the "
                      "executable); build with synth_modules enabled\n";
         return 2;
     }
-#endif
+    if (!system_modules_dir.empty()) {
+        options.system_modules_dir = system_modules_dir;
+        options.system_modules_fallback = system_modules_fallback;
+    }
     if (keep) {
         std::error_code ec;
         auto work = fs::temp_directory_path(ec) / ("sheller_unpack_" + std::to_string(cli_pid()));
@@ -724,6 +761,16 @@ int main(int argc, char* argv[])
     auto run_guest_stdout = false;
     run_command->add_flag("--guest-stdout", run_guest_stdout,
                           "forward guest file-output bytes to standard output (default: discard)");
+    std::string run_system_modules_dir;
+    run_command
+        ->add_option("--system-modules", run_system_modules_dir,
+                     "directory-mode system modules: the resident set comes strictly from this "
+                     "directory (boundary pair derived, everything else real bytes)")
+        ->check(CLI::ExistingDirectory);
+    auto run_system_modules_fallback = false;
+    run_command->add_flag("--system-modules-fallback", run_system_modules_fallback,
+                          "with --system-modules: a closure member the directory lacks falls back "
+                          "to the synthetic directory and is marked in the module source table");
     run_command->callback([&] {
         apply_log_level();
         std::optional<StopGoal> stop;
@@ -738,7 +785,7 @@ int main(int argc, char* argv[])
                          .esp_stop_goal =
                              stop.has_value() ? stop->esp : sheller::engine::EspStopGoal::kNone},
             run_report_path, event_level_of(event_level), run_from_snapshot, run_save_snapshot,
-            run_guest_stdout);
+            run_guest_stdout, run_system_modules_dir, run_system_modules_fallback);
     });
 
     std::string unpack_sample_path;
@@ -782,6 +829,17 @@ int main(int argc, char* argv[])
     std::string unpack_report_path;
     unpack_command->add_option("--report", unpack_report_path,
                                "behavior/event report path (default: <output>.report.json)");
+    std::string unpack_system_modules_dir;
+    unpack_command
+        ->add_option("--system-modules", unpack_system_modules_dir,
+                     "directory-mode system modules: the resident set comes strictly from this "
+                     "directory (boundary pair derived, everything else real bytes)")
+        ->check(CLI::ExistingDirectory);
+    auto unpack_system_modules_fallback = false;
+    unpack_command->add_flag("--system-modules-fallback", unpack_system_modules_fallback,
+                             "with --system-modules: a closure member the directory lacks falls "
+                             "back to the synthetic directory and is marked in the module source "
+                             "table");
 
     // Offered by each subcommand that reaches the library, because an app-level option
     // would have to precede the subcommand name on the command line.
@@ -832,7 +890,8 @@ int main(int argc, char* argv[])
                          .xfer_number = stop.has_value() && stop->xfer_goal ? stop->xfer_number : 0,
                          .esp_stop_goal =
                              stop.has_value() ? stop->esp : sheller::engine::EspStopGoal::kNone},
-            unpack_report_path, unpack_save_snapshot);
+            unpack_report_path, unpack_save_snapshot, unpack_system_modules_dir,
+            unpack_system_modules_fallback);
     });
     add_log_level_option(capture_command);
     add_log_level_option(run_command);

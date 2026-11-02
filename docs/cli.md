@@ -18,11 +18,14 @@ sheller run <sample> [--from-snapshot] [--reject <number>=<status>]... [--dump <
             [-b|--budget <n>M] [--stop <goal>] [--timeout-ms <ms>]
             [--report <file.json>] [--event-level <semantic|counts|full>]
             [--save-snapshot <path>] [--guest-stdout]
+            [--system-modules <dir>] [--system-modules-fallback]
             [--log-level <debug|info|warn|error>]
 sheller unpack <sample.exe> [-o <out.exe>] [--shellcode] [--keep]
             [-b|--budget <n>M] [--stop <goal>] [--timeout-ms <ms>]
             [--report <file.json>] [--event-level <semantic|counts|full>]
-            [--save-snapshot <path>] [--log-level <debug|info|warn|error>]
+            [--save-snapshot <path>]
+            [--system-modules <dir>] [--system-modules-fallback]
+            [--log-level <debug|info|warn|error>]
 ```
 
 ## Routes
@@ -57,6 +60,18 @@ directory does not pass); private, path-shaped, or missing dependencies
 are rejected by name before any process exists. The non-Windows
 construction route for DLL input is not delivered yet - DLL samples
 there fail with a named construction error until that slice lands.
+
+`--system-modules <dir>` builds the resident system world strictly from the
+named directory (real DLL bytes; the boundary pair `ntdll.dll`/`win32u.dll`
+derives under the hash-bound manifest) - the host's system directories are
+never read, and a closure member the directory lacks is a named rejection.
+`--system-modules-fallback` opts into pulling such members from the synthetic
+directory, marked in the module source table. The directory ships its own
+`apiset-map.bin` (required; API Set resolution stops prefix guessing), and a
+constructed container carries the versioned metadata record plus the e_res2
+marker, so replay restores the run tables without the directory. Unsupported
+boundary functions stop the run with a `boundary-trap` diagnosis in the
+report. `capture` does not offer these options.
 
 `--reject` maps a syscall number to a rejection NTSTATUS, both hexadecimal, and is
 repeatable:

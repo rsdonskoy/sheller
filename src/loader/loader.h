@@ -71,6 +71,14 @@ std::expected<std::vector<std::uint8_t>, LoadError> build_image(std::span<const 
 std::expected<void, LoadError> apply_relocations(std::span<std::uint8_t> image,
                                                  const ImageInfo& info, std::uint64_t base_delta);
 
+// Verifies the relocation table is applicable: every HIGHLOW/DIR64 fixup
+// target must land inside the image. The directory-mode load consults this
+// before trusting a shifted image - a table that names out-of-range targets
+// is the "needs relocation without effective info" shape, and the load is
+// a named rejection instead of a half-fixed image.
+std::expected<void, LoadError> validate_relocations(std::span<const std::uint8_t> image,
+                                                    const ImageInfo& info);
+
 // Reads the TLS callback VA array (DataDirectory[9] -> directory's
 // AddressOfCallBacks, NUL-terminated array of absolute VAs). Bounded.
 // base_delta is the relocation already applied to the image: a remapped

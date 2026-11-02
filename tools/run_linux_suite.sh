@@ -106,6 +106,10 @@ mirror_tree() {
   # tree - possibly built for another platform - cannot survive into the next run.
   find "$DST" -mindepth 1 -maxdepth 1 ! -name build -exec rm -rf {} + || return 1
   tar -C "$SRC" "${MIRROR_EXCLUDES[@]}" -cf - . | tar -C "$DST" -xf -
+  # Restamp the extracted sources: the drvfs mount reports lying mtimes, and a
+  # stamp older than a build-tree object makes ninja skip a changed source
+  # (loader.cpp.o hid a new symbol this way for three gate runs).
+  find "$DST/src" "$DST/include" "$DST/tests" -type f \( -name '*.cpp' -o -name '*.h' -o -name '*.inc' \) -exec touch {} +
 }
 
 test_count_query() {

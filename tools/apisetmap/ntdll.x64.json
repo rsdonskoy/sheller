@@ -1,0 +1,19 @@
+{
+  "schema": 1,
+  "arch": "x64",
+  "anchor": {
+    "xxhash64": "0x6c806f42b18c5f46",
+    "note": "tests/boundary_fixture.h make_boundary_source(boundary_fixture_exports(false)) - the self-made mechanism-corpus ntdll the CI directory-mode tests map; re-pin when the fixture changes"
+  },
+  "entries": [
+    {"contract": "api-ms-win-core-fixture-l1-1-0", "host": "fakentdll.dll"},
+    {"contract": "api-ms-win-core-fixture-ext-l1-1-0", "host": "other.dll"},
+    {"contract": "api-ms-win-core-console-l1-1-0", "importer": "fakeuser32.dll", "host": "other.dll"},
+    {"contract": "api-ms-win-core-console-l1-1-0", "host": "fakentdll.dll"},
+    {"contract": "api-ms-win-crt-heap-l1-1-0", "host": "ucrtbase.dll"},
+    {"contract": "api-ms-win-crt-locale-l1-1-0", "host": "ucrtbase.dll"},
+    {"contract": "api-ms-win-crt-math-l1-1-0", "host": "ucrtbase.dll"},
+    {"contract": "api-ms-win-crt-runtime-l1-1-0", "host": "ucrtbase.dll"},
+    {"contract": "api-ms-win-crt-stdio-l1-1-0", "host": "ucrtbase.dll"}
+  ]
+}

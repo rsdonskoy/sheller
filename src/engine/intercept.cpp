@@ -276,13 +276,38 @@ void intercept_virtual_protect(SyscallRunState& state)
 
 // Resident-module lookup by folded name (API-set reduction first, then the
 // module table). Pure: no load side effects. Shared by the load and handle
-// queries.
+// queries. The API-set reduction follows the run's explicit context — the
+// prefix rules in the synthetic routes, the directory map in directory mode
+// (no fallback); an api-set name the map does not cover reduces to nothing.
 std::uint64_t resident_module_base(const SyscallRunState& state, const std::string& folded)
 {
     for (const auto& record : state.loader_modules) {
         if (fold_name(std::string_view(record.name.data())) == folded) {
             return record.base;
         }
+    }
+    if (state.directory_mode) {
+        if (state.api_set_ctx.mode == loader::ApiSetContext::Mode::kDirectoryMap &&
+            state.api_set_ctx.directory_map != nullptr) {
+            auto contract = folded;
+            if (contract.size() > 4 && contract.compare(contract.size() - 4, 4, ".dll") == 0) {
+                contract.resize(contract.size() - 4);
+            }
+            if (contract.rfind("api-ms-", 0) != 0 && contract.rfind("ext-ms-", 0) != 0) {
+                return 0;
+            }
+            const auto host = state.api_set_ctx.directory_map->host_for(contract, {});
+            if (!host.has_value()) {
+                return 0;
+            }
+            const auto host_folded = fold_name(*host);
+            for (const auto& record : state.loader_modules) {
+                if (fold_name(std::string_view(record.name.data())) == host_folded) {
+                    return record.base;
+                }
+            }
+        }
+        return 0;
     }
     // API-set request: reduce to the host module (API Set Schema pre-pass,
     // loader::api_set_host) - the set has no image of its own, and the real
@@ -423,6 +448,27 @@ void intercept_get_std_handle(SyscallRunState& state)
         handle = kStdPseudoBase + 2;
     }
     intercept_return(state, handle, 4);
+}
+
+// strlen(s): the honest length of the NUL-terminated guest string, walked
+// byte by byte (a failed read ends the walk - unmapped memory reads as if
+// the string ended there). Capped to keep a hostile unterminated buffer
+// from spinning the hook; cdecl cleans its own frame on both bitnesses.
+void intercept_strlen(SyscallRunState& state)
+{
+    constexpr std::uint64_t kStrlenCap = 1ULL << 20;
+    const auto va = intercept_arg(state, 0);
+    std::uint64_t length = 0;
+    if (va != 0) {
+        while (length < kStrlenCap) {
+            std::uint8_t byte = 0;
+            if (uc_mem_read(state.uc, va + length, &byte, sizeof byte) != UC_ERR_OK || byte == 0) {
+                break;
+            }
+            ++length;
+        }
+    }
+    intercept_return(state, length, 0);
 }
 
 // Critical-section family: a no-op lock. Initialize writes nothing (the
@@ -722,6 +768,9 @@ std::optional<std::uint32_t> intercept_id_for(std::string_view name)
         {"RegQueryValueExA", static_cast<std::uint32_t>(InterceptId::kRegQueryValueEx)},
         {"RegQueryValueExW", static_cast<std::uint32_t>(InterceptId::kRegQueryValueEx)},
         {"RegCloseKey", static_cast<std::uint32_t>(InterceptId::kRegCloseKey)},
+        // Directory mode: real kernelbase bodies (lstrlenA et al) call this
+        // CRT-in-ntdll spelling; the trap-classified derived body never runs.
+        {"strlen", static_cast<std::uint32_t>(InterceptId::kStrlen)},
     };
     for (const auto& [key, id] : kTable) {
         if (key == name) {
@@ -1007,6 +1056,9 @@ void on_intercept([[maybe_unused]] uc_engine* uc, const std::uint64_t address, c
                 break;
             case InterceptId::kRegCloseKey:
                 intercept_reg_close(*state);
+                break;
+            case InterceptId::kStrlen:
+                intercept_strlen(*state);
                 break;
             }
             break;

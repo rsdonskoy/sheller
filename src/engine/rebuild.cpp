@@ -61,8 +61,10 @@ SyscallRunError run_error_of(const RebuildError error)
 
 SyscallRunFailure run_failure_of(const RebuildFailure& failure)
 {
-    // Prepare-stage failures carry no run statistics.
-    return SyscallRunFailure{run_error_of(failure.error), failure.unicorn_code, {}};
+    // Prepare-stage failures carry no run statistics; the named rejection
+    // detail (the loader-route wording names the module and the reason)
+    // travels with the mapped error.
+    return SyscallRunFailure{run_error_of(failure.error), failure.unicorn_code, {}, failure.detail};
 }
 
 } // namespace
@@ -135,6 +137,9 @@ std::string_view syscall_run_error_message(const SyscallRunError error)
         return "guest crashed on an unhandled exception";
     case SyscallRunError::kSyntheticModulesMissing:
         return "synthetic system modules required to replay this container (none provided)";
+    case SyscallRunError::kBoundaryTrap:
+        return "unsupported boundary function stopped the run (the named diagnosis rides the "
+               "detail)";
     }
     return "unknown syscall run error";
 }
@@ -176,7 +181,7 @@ run_snapshot_syscalls_with_facts(const std::filesystem::path& snapshot_path,
     guest->relative_base = snapshot_path.parent_path();
     if (const auto attached = reattach_synthetic_world(*guest, options.synthetic_module_dir);
         !attached) {
-        return std::unexpected(SyscallRunFailure{attached.error(), 0, {}});
+        return std::unexpected(SyscallRunFailure{attached.error(), 0, {}, {}});
     }
     auto run = run_syscalls(*guest, options, facts);
     if (!run) {
@@ -197,7 +202,8 @@ run_pe_file_with_facts(const std::filesystem::path& pe_path, const SyscallRunOpt
     // directly, so the default path stays zero-touch.
     auto guest = prepare_pe_file(pe_path, options.windows_fidelity_dispatch,
                                  options.synthetic_system_modules ? options.synthetic_module_dir
-                                                                  : std::filesystem::path{});
+                                                                  : std::filesystem::path{},
+                                 options.system_modules_dir, options.system_modules_fallback);
     if (!guest) {
         return std::unexpected(run_failure_of(guest.error()));
     }
@@ -209,9 +215,13 @@ run_pe_file_with_facts(const std::filesystem::path& pe_path, const SyscallRunOpt
 #else
     // Non-Windows hosts execute the constructed container, never the live
     // loader guest: construction is the only producer, replay the only
-    // executor.
-    auto container = craft_sample_container(pe_path, options.windows_fidelity_dispatch,
-                                            options.synthetic_module_dir);
+    // executor. The directory options thread through - a directory-mode
+    // sample run constructs the directory world here exactly like the
+    // Windows route does.
+    auto container = craft_sample_container(
+        pe_path, options.windows_fidelity_dispatch,
+        options.synthetic_system_modules ? options.synthetic_module_dir : std::filesystem::path{},
+        options.system_modules_dir, options.system_modules_fallback);
     if (!container) {
         return std::unexpected(run_failure_of(container.error()));
     }
@@ -230,7 +240,7 @@ run_snapshot_syscalls_with_facts(const std::vector<std::uint8_t>& snapshot,
     }
     if (const auto attached = reattach_synthetic_world(*guest, options.synthetic_module_dir);
         !attached) {
-        return std::unexpected(SyscallRunFailure{attached.error(), 0, {}});
+        return std::unexpected(SyscallRunFailure{attached.error(), 0, {}, {}});
     }
     auto run = run_syscalls(*guest, options, facts);
     if (!run) {

@@ -1,27 +1,49 @@
 #include "loader_route.h"
 
+#include "../loader/boundary_derive.h"
 #include "../loader/env.h"
 #include "../loader/imports.h"
 #include "../loader/loader.h"
+#include "boundary_manifest.h"
+#include "boundary_metadata.h"
 #include "intercept.h"
 
 #include <algorithm>
 #include <cstring>
 #include <format>
 #include <fstream>
+#include <set>
 
 #include <sheller/log.h>
+#include <xxhash.h>
 
 namespace sheller::engine {
 namespace {
 
 // The system-module set stage's product: the resident modules, their
-// guest-side map bytes (fixed base -> image), and the intercepted
-// (VA, handler id) pairs the import resolution registered.
+// guest-side map bytes (fixed base -> image), the intercepted
+// (VA, handler id) pairs the import resolution registered, and - directory
+// mode only - the module source table, the manifested boundary rules and
+// the loaded API Set map.
 struct LoadedSystemModules {
     std::vector<loader::LoadedModule> modules;
     std::vector<std::pair<std::uint64_t, std::vector<std::uint8_t>>> maps;
     std::vector<std::pair<std::uint64_t, std::uint32_t>> intercepts;
+    // folded module name -> source class (the module source table)
+    std::vector<std::pair<std::string, SystemModuleSource>> sources;
+    // index-parallel to modules: the whole-file hash of the bytes each
+    // module came from (0 where unbound: the synthetic/host routes)
+    std::vector<std::uint64_t> image_hashes;
+    // folded boundary module name -> applicability-checked manifest rules
+    std::map<std::string, std::vector<loader::BoundaryRule>> boundary_rules;
+    // folded boundary module name -> its derivation dispositions (the
+    // metadata's boundary records)
+    std::map<std::string, std::vector<loader::DerivedBoundaryExport>> boundary_dispositions;
+    // the directory's API Set map, anchored to its raw ntdll
+    loader::ApiSetMapView api_set_map;
+    // the raw apiset-map.bin bytes + anchor (the metadata embeds them)
+    std::vector<std::uint8_t> apiset_file_bytes;
+    std::uint64_t apiset_anchor{};
 };
 
 // The resident core modules, in load order. The fixed bases come from
@@ -110,6 +132,500 @@ SyntheticDirectoryPlan plan_synthetic_directory(const GuestMode mode,
     return plan;
 }
 
+// Interception bookkeeping shared by both source routes: a resolved import
+// whose final name is in the intercept set hooks that function entry
+// (VA + stable handler id). One entry per VA: the sample's and the
+// residents' fixups can name the same final function, and a duplicated
+// address would double-scan and double-count on the dispatch path.
+void register_import_intercepts(const std::vector<loader::ImportFixup>& fixups,
+                                const std::vector<loader::LoadedModule>& modules,
+                                std::vector<std::pair<std::uint64_t, std::uint32_t>>& intercepts)
+{
+    for (const auto& fixup : fixups) {
+        const auto already =
+            std::any_of(intercepts.begin(), intercepts.end(),
+                        [&](const auto& entry) { return entry.first == fixup.resolved; });
+        if (already) {
+            continue;
+        }
+        for (const auto& system : modules) {
+            for (const auto& [name, va] : system.exports) {
+                if (va == fixup.resolved) {
+                    if (const auto id = intercept_id_for(name)) {
+                        intercepts.emplace_back(fixup.resolved, *id);
+                    }
+                }
+            }
+        }
+    }
+}
+
+// Reads one file's bytes; a read failure is a named IO rejection carrying
+// the path.
+std::expected<std::vector<std::uint8_t>, RebuildFailure>
+read_file_bytes(const std::filesystem::path& path)
+{
+    std::ifstream in(path, std::ios::binary);
+    if (!in) {
+        return std::unexpected(
+            failure(RebuildError::kIoFailure, std::format("cannot read '{}'", path.string())));
+    }
+    return std::vector<std::uint8_t>{std::istreambuf_iterator<char>(in),
+                                     std::istreambuf_iterator<char>()};
+}
+
+// Loads one real-byte module: parse, build, relocate, index - every result
+// checked, any failure a named construction rejection (no ignored-return or
+// base-only comparison path). The module joins the set with its source mark.
+std::expected<void, RebuildFailure>
+load_real_module(const std::vector<std::uint8_t>& bytes, const std::string_view folded_name,
+                 const std::uint64_t fixed_base, const SystemModuleSource source,
+                 LoadedSystemModules& loaded, const bool pi_exempt = false)
+{
+    const auto reject = [&](const std::string& why) {
+        return std::unexpected(
+            failure(RebuildError::kBadSnapshot, std::format("{}: {}", folded_name, why)));
+    };
+    auto info = loader::parse_pe(bytes);
+    if (!info.has_value()) {
+        return reject(std::string(loader::load_error_message(info.error())));
+    }
+    // directory mode is an x64 world: an i386 module file names itself here
+    if (info->bitness != loader::kBitness64) {
+        return reject("i386 module in an x64 directory world");
+    }
+    auto module_image = loader::build_image(bytes, *info);
+    if (!module_image.has_value()) {
+        return reject(std::string(loader::load_error_message(module_image.error())));
+    }
+    const auto delta = fixed_base - info->image_base;
+    if (delta != 0 && info->reloc_directory_rva != 0 && info->reloc_directory_size != 0) {
+        // fixups exist and the base moved: the table must be fully
+        // applicable (every fixup target inside the image - the
+        // "needs relocation without effective info" shape rejects here) and
+        // the application must succeed.
+        if (const auto valid = loader::validate_relocations(*module_image, *info);
+            !valid.has_value()) {
+            return reject("relocation table names targets outside the image");
+        }
+        if (const auto relocated = loader::apply_relocations(*module_image, *info, delta);
+            !relocated.has_value()) {
+            return reject(std::string(loader::load_error_message(relocated.error())));
+        }
+    } else if (delta != 0 && !pi_exempt) {
+        // a real directory input moved off its preferred base with no
+        // relocation table: absolute fields cannot be fixed up, so this is a
+        // named rejection - only images known position-independent by
+        // construction (the generator's synthetic fallback modules) load
+        // without a table
+        return reject(
+            std::format("mapped at 0x{:x} but carries no relocation directory", fixed_base));
+    }
+    if (folded_name.size() >= 64) {
+        return reject(
+            std::format("module name {} bytes exceeds the 63-byte name limit", folded_name.size()));
+    }
+    loader::LoadedModule module;
+    module.base = fixed_base;
+    module.image = std::move(*module_image);
+    module.name.fill(0);
+    std::memcpy(module.name.data(), folded_name.data(), folded_name.size());
+    if (!loader::index_exports(module).has_value()) {
+        return reject("export index failed");
+    }
+    loaded.sources.emplace_back(std::string(folded_name), source);
+    loaded.image_hashes.push_back(XXH64(bytes.data(), bytes.size(), 0));
+    loaded.modules.push_back(std::move(module));
+    return {};
+}
+
+// Directory mode (change real-dll-module-dir): the strict source tiers. The
+// boundary pair derives from the directory files under the committed
+// manifest (ntdll required, win32u optional), every other directory DLL
+// maps as real bytes, the API Set map is required and anchored to the raw
+// ntdll, and the sample's module closure must resolve from the directory -
+// a missing member is a named rejection, or an explicitly-marked synthetic
+// fallback when the option is on. The host system directories are never
+// read.
+std::expected<LoadedSystemModules, RebuildFailure> load_directory_system_modules(
+    const GuestMode mode, const std::filesystem::path& dir, const bool fallback_enabled,
+    const std::filesystem::path& synthetic_module_dir, std::vector<std::uint8_t>& image)
+{
+    // Phase 1 derives the x64 boundary pair only (design Non-Goals).
+    if (mode != GuestMode::kX64) {
+        return std::unexpected(failure(RebuildError::kBadSnapshot,
+                                       "system-modules directory mode is x64-only in this phase"));
+    }
+    std::error_code probe_ec;
+    if (!std::filesystem::is_directory(dir, probe_ec) || probe_ec) {
+        return std::unexpected(
+            failure(RebuildError::kIoFailure,
+                    std::format("system-modules directory '{}' is not readable", dir.string())));
+    }
+    LoadedSystemModules loaded;
+    const auto dir_file = [&dir](const std::string_view name) {
+        return dir / std::filesystem::path(std::string_view(name));
+    };
+
+    // The API Set map is required and anchored to the directory's own raw
+    // ntdll (design D5) - the boundary derivation binds to the same hash.
+    const auto map_bytes = read_file_bytes(dir_file("apiset-map.bin"));
+    if (!map_bytes.has_value()) {
+        return std::unexpected(
+            failure(RebuildError::kIoFailure,
+                    std::format("system-modules directory '{}' lacks apiset-map.bin (the API Set "
+                                "map travels with the directory)",
+                                dir.string())));
+    }
+    const auto ntdll_path = dir_file("ntdll.dll");
+    auto ntdll_bytes = read_file_bytes(ntdll_path);
+    if (!ntdll_bytes.has_value()) {
+        return std::unexpected(
+            failure(RebuildError::kIoFailure, std::format("system-modules directory mode requires "
+                                                          "ntdll.dll: {}",
+                                                          ntdll_bytes.error().detail)));
+    }
+    const auto ntdll_hash = XXH64(ntdll_bytes->data(), ntdll_bytes->size(), 0);
+    auto map_view = loader::ApiSetMapView::load(*map_bytes, loader::kApiSetMapArchX64, ntdll_hash);
+    if (!map_view.has_value()) {
+        return std::unexpected(
+            failure(RebuildError::kBadSnapshot,
+                    std::format("apiset-map.bin rejected: {} ({})",
+                                loader::apiset_map_error_message(map_view.error().code),
+                                map_view.error().detail)));
+    }
+    loaded.apiset_file_bytes = *map_bytes;
+    loaded.apiset_anchor = ntdll_hash;
+    loaded.api_set_map = std::move(*map_view);
+
+    // The boundary pair: ntdll derives at its reserved base, win32u derives
+    // only when the directory carries it (a referenced-but-absent win32u is
+    // the binding stage's named rejection, not a load failure).
+    const auto& bases = kBases64;
+    const auto derive_boundary = [&](const std::string_view module_name, const std::uint64_t base,
+                                     const bool required) -> std::expected<void, RebuildFailure> {
+        auto bytes = read_file_bytes(dir_file(module_name));
+        if (!bytes.has_value()) {
+            if (required) {
+                return std::unexpected(
+                    failure(RebuildError::kIoFailure,
+                            std::format("system-modules directory mode requires {}: {}",
+                                        module_name, bytes.error().detail)));
+            }
+            return {}; // optional boundary member: absent, not resident
+        }
+        const auto hash = XXH64(bytes->data(), bytes->size(), 0);
+        auto rules = BoundaryManifest::committed().rules_for(module_name, "x64", hash);
+        if (!rules.has_value()) {
+            return std::unexpected(
+                failure(RebuildError::kBadSnapshot,
+                        std::format("{}: boundary manifest rejected: {}", module_name,
+                                    boundary_manifest_error_message(rules.error()))));
+        }
+        auto derived = loader::derive_boundary_image(*bytes, module_name, *rules);
+        if (!derived.has_value()) {
+            return std::unexpected(failure(RebuildError::kBadSnapshot,
+                                           std::format("{}: boundary derivation rejected: {}",
+                                                       module_name, derived.error().detail)));
+        }
+        loader::LoadedModule module;
+        module.base = base;
+        // the derived bytes are a PE file; the guest map takes the folded
+        // SizeOfImage image every other module path builds (page-aligned)
+        auto derived_info = loader::parse_pe(derived->image);
+        if (!derived_info.has_value()) {
+            return std::unexpected(
+                failure(RebuildError::kBadSnapshot,
+                        std::format("{}: derived image does not parse: {}", module_name,
+                                    loader::load_error_message(derived_info.error()))));
+        }
+        auto guest_image = loader::build_image(derived->image, *derived_info);
+        if (!guest_image.has_value()) {
+            return std::unexpected(
+                failure(RebuildError::kBadSnapshot,
+                        std::format("{}: derived image build failed: {}", module_name,
+                                    loader::load_error_message(guest_image.error()))));
+        }
+        module.image = std::move(*guest_image);
+        // the derived ntdll carries the independent mode marker in its
+        // reserved DOS e_res2 slot (design D6) - part of the generated
+        // image contract, written before any map bytes exist
+        if (module_name == "ntdll.dll") {
+            if (const auto marked =
+                    boundary_metadata::write_marker(module.image, boundary_metadata::kMetadataBase);
+                !marked.has_value()) {
+                return std::unexpected(failure(
+                    RebuildError::kBadSnapshot,
+                    std::format("{}: mode marker rejected: {}", module_name,
+                                boundary_metadata::metadata_error_message(marked.error().code))));
+            }
+        }
+        if (module_name.size() >= sizeof(module.name)) {
+            return std::unexpected(
+                failure(RebuildError::kBadSnapshot,
+                        std::format("{}: module name exceeds the {}-byte name limit", module_name,
+                                    sizeof(module.name) - 1)));
+        }
+        module.name.fill(0);
+        std::memcpy(module.name.data(), module_name.data(), module_name.size());
+        if (!loader::index_exports(module).has_value()) {
+            return std::unexpected(
+                failure(RebuildError::kBadSnapshot,
+                        std::format("{}: derived export index failed", module_name)));
+        }
+        loaded.sources.emplace_back(std::string(module_name),
+                                    SystemModuleSource::kDirectoryDerived);
+        loaded.image_hashes.push_back(hash);
+        loaded.boundary_rules.emplace(std::string(module_name), std::move(*rules));
+        loaded.boundary_dispositions.emplace(std::string(module_name), std::move(derived->exports));
+        loaded.modules.push_back(std::move(module));
+        return {};
+    };
+    if (const auto loaded_ntdll = derive_boundary("ntdll.dll", bases[0], true);
+        !loaded_ntdll.has_value()) {
+        return std::unexpected(loaded_ntdll.error());
+    }
+
+    // The other directory DLLs: the four core names map at their reserved
+    // slots (real bytes), everything else takes the extras ladder in sorted
+    // name order - win32u derives there, the rest map as real bytes.
+    const constexpr auto is_core_name = [](const std::string_view folded) {
+        return folded == "kernel32.dll" || folded == "kernelbase.dll" || folded == "advapi32.dll" ||
+               folded == "user32.dll";
+    };
+    std::vector<std::filesystem::path> extras;
+    for (const auto& entry : std::filesystem::directory_iterator(dir, probe_ec)) {
+        auto name = entry.path().filename().string();
+        if (name.size() <= 4 || name.compare(name.size() - 4, 4, ".dll") != 0) {
+            continue;
+        }
+        for (auto& c : name) {
+            if (c >= 'A' && c <= 'Z') {
+                c = static_cast<char>(c - 'A' + 'a');
+            }
+        }
+        if (name == "ntdll.dll" || name == "apiset-map.bin") {
+            continue;
+        }
+        extras.push_back(entry.path());
+    }
+    std::sort(extras.begin(), extras.end());
+    std::size_t extra_index = 0;
+    for (const auto& path : extras) {
+        std::string folded = path.filename().string();
+        for (auto& c : folded) {
+            if (c >= 'A' && c <= 'Z') {
+                c = static_cast<char>(c - 'A' + 'a');
+            }
+        }
+        if (is_core_name(folded)) {
+            std::size_t slot = 1;
+            for (std::size_t i = 1; i < std::size(kSystemModules); ++i) {
+                if (folded == kSystemModules[i].folded_name) {
+                    slot = i;
+                    break;
+                }
+            }
+            auto bytes = read_file_bytes(path);
+            if (!bytes.has_value()) {
+                return std::unexpected(bytes.error());
+            }
+            if (const auto ok = load_real_module(*bytes, folded, bases[slot],
+                                                 SystemModuleSource::kDirectoryRealBytes, loaded);
+                !ok.has_value()) {
+                return std::unexpected(ok.error());
+            }
+            continue;
+        }
+        const auto base = extra_module_base(mode, extra_index++);
+        if (folded == "win32u.dll") {
+            if (const auto ok = derive_boundary(folded, base, true); !ok.has_value()) {
+                return std::unexpected(ok.error());
+            }
+            continue;
+        }
+        auto bytes = read_file_bytes(path);
+        if (!bytes.has_value()) {
+            return std::unexpected(bytes.error());
+        }
+        if (const auto ok = load_real_module(*bytes, folded, base,
+                                             SystemModuleSource::kDirectoryRealBytes, loaded);
+            !ok.has_value()) {
+            return std::unexpected(ok.error());
+        }
+    }
+
+    // Strict closure over the FULL dependency graph: resolve the sample and
+    // every resident real module; modules missing from the directory join
+    // from the frozen synthetic fallback (when enabled) until the resident
+    // set stops growing. An api-set name the map does not cover is the named
+    // unmapped rejection; a missing member without fallback coverage is the
+    // named rejection - never a silent partial world. Function-level misses
+    // keep the existing recorded-tolerated semantics.
+    loader::ApiSetContext api_set_ctx;
+    api_set_ctx.mode = loader::ApiSetContext::Mode::kDirectoryMap;
+    api_set_ctx.directory_map = &loaded.api_set_map;
+    const auto resident = [&loaded](const std::string_view folded) {
+        return std::any_of(loaded.modules.begin(), loaded.modules.end(),
+                           [folded](const loader::LoadedModule& module) {
+                               return std::string_view(module.name.data()) == folded;
+                           });
+    };
+    std::set<std::string> missing;
+    // missing module -> the resident module whose import pulled it in (for
+    // the rejection wording); empty for sample-direct references
+    std::map<std::string, std::string> missing_dependents;
+    for (;;) {
+        // resolve the sample and each resident real module against the
+        // current set; collect the module-level names still missing
+        std::vector<loader::UnresolvedImport> loop_unresolved;
+        std::vector<std::string> loop_dependents;
+        static_cast<void>(
+            loader::resolve_imports(image, loaded.modules, &loop_unresolved, api_set_ctx, {}));
+        loop_dependents.assign(loop_unresolved.size(),
+                               std::string{}); // sample-direct: no depending module
+        for (std::size_t i = 0; i < loaded.modules.size(); ++i) {
+            if (loaded.sources[i].second != SystemModuleSource::kDirectoryRealBytes &&
+                loaded.sources[i].second != SystemModuleSource::kFallbackSynthetic) {
+                continue; // derived boundary images carry no import table
+            }
+            std::vector<loader::UnresolvedImport> module_unresolved;
+            static_cast<void>(loader::resolve_imports(
+                loaded.modules[i].image, loaded.modules, &module_unresolved, api_set_ctx,
+                std::string_view(loaded.modules[i].name.data())));
+            const std::string depending_module(std::string_view(loaded.modules[i].name.data()));
+            for (const auto& miss : module_unresolved) {
+                loop_unresolved.emplace_back(miss);
+                loop_dependents.emplace_back(depending_module);
+            }
+        }
+        missing.clear();
+        std::size_t entry_index = 0;
+        // the importer's report spelling: a resident module names itself; the
+        // sample's own imports name the sample image (never an empty slot)
+        const auto importer_spelled = [](const std::string& depending_module) {
+            return depending_module.empty() ? std::string{"the sample image"} : depending_module;
+        };
+        for (const auto& entry : loop_unresolved) {
+            const auto& depending_module = loop_dependents[entry_index++];
+            if (entry.unmapped_api_set) {
+                return std::unexpected(
+                    failure(RebuildError::kBadSnapshot,
+                            std::format("api set not mapped by apiset-map.bin: {} (imported by {})",
+                                        entry.missing_module, importer_spelled(depending_module))));
+            }
+            // The resolver carries the actual missing endpoint after API Set
+            // reduction and every forwarder hop, using the original importer.
+            if (entry.missing_module.empty()) {
+                continue;
+            } // symbol, not module, missing
+            const auto folded = fold_name(entry.missing_module);
+            if (folded.size() >= 64 || folded.find_first_of("/\\:") != std::string::npos ||
+                folded.find("..") != std::string::npos) {
+                return std::unexpected(
+                    failure(RebuildError::kBadSnapshot, "path-shaped dependency: " + folded));
+            }
+            if (!resident(folded)) {
+                missing.insert(folded);
+                // remember the depending module for the rejection's wording
+                missing_dependents.emplace(folded, depending_module);
+            }
+        }
+        if (missing.empty()) {
+            break;
+        }
+        // the fallback residents join from the frozen synthetic directory;
+        // without the option this is the named rejection
+        for (const auto& name : missing) {
+            std::error_code missing_ec;
+            const auto synth_path = synthetic_module_dir.empty()
+                                        ? std::filesystem::path{}
+                                        : synthetic_module_path(synthetic_module_dir, name, mode);
+            const bool fallback_available = fallback_enabled && !synth_path.empty() &&
+                                            std::filesystem::exists(synth_path, missing_ec) &&
+                                            !missing_ec;
+            if (!fallback_available) {
+                auto detail = std::format("system module missing from directory '{}': {}{}",
+                                          dir.string(), name,
+                                          fallback_enabled ? " and no synthetic fallback covers it"
+                                                           : " (the fallback option is off)");
+                const auto dependent = missing_dependents.find(name);
+                if (dependent != missing_dependents.end()) {
+                    detail += std::format(" (imported by {})", importer_spelled(dependent->second));
+                }
+                return std::unexpected(failure(RebuildError::kBadSnapshot, detail));
+            }
+            auto bytes = read_file_bytes(synth_path);
+            if (!bytes.has_value()) {
+                return std::unexpected(bytes.error());
+            }
+            if (const auto ok =
+                    load_real_module(*bytes, name, extra_module_base(mode, extra_index++),
+                                     SystemModuleSource::kFallbackSynthetic, loaded,
+                                     /*pi_exempt=*/true);
+                !ok.has_value()) {
+                return std::unexpected(ok.error());
+            }
+        }
+    }
+    // Resident IAT binding: every real-byte module's own import table
+    // resolves against the complete resident set (forwarder chains and the
+    // API Set map included), writing the resolved VAs into its host image -
+    // before any map bytes are generated, so the host image, the guest copy
+    // and the container region all carry the same final IAT. A dependency
+    // that fails to resolve is the named rejection: no half-bound world.
+    // No resident module runs DllMain, TLS callbacks or any entry
+    // initialization - binding is the only writeback.
+    for (std::size_t i = 0; i < loaded.modules.size(); ++i) {
+        const auto source = loaded.sources[i].second;
+        if (source != SystemModuleSource::kDirectoryRealBytes &&
+            source != SystemModuleSource::kFallbackSynthetic) {
+            continue; // derived boundary images carry no import table
+        }
+        auto& module = loaded.modules[i];
+        const std::string_view module_name(module.name.data());
+        std::vector<loader::UnresolvedImport> resident_unresolved;
+        const auto bound = loader::resolve_imports(module.image, loaded.modules,
+                                                   &resident_unresolved, api_set_ctx, module_name);
+        if (!bound.has_value()) {
+            return std::unexpected(
+                failure(RebuildError::kBadSnapshot,
+                        std::format("{}: resident IAT binding failed", module_name)));
+        }
+        if (!resident_unresolved.empty()) {
+            return std::unexpected(
+                failure(RebuildError::kBadSnapshot,
+                        std::format("{}: unresolved dependency '{}!{}'", module_name,
+                                    resident_unresolved.front().dll_name,
+                                    resident_unresolved.front().function_name)));
+        }
+        // Real bodies call each other's imports: a resident module's own
+        // resolved imports join the interception set, so an intercepted
+        // final name hooks wherever it is called from, not only from the
+        // sample (the loop is idempotent - binding re-runs below re-bind to
+        // the same VAs, and the registration deduplicates by VA).
+        register_import_intercepts(*bound, loaded.modules, loaded.intercepts);
+    }
+    // the sample resolves once more over the complete set (idempotent -
+    // already-bound slots re-bind to the same VAs)
+    std::vector<loader::ImportFixup> fixups;
+    {
+        std::vector<loader::UnresolvedImport> sample_unresolved;
+        auto resolved =
+            loader::resolve_imports(image, loaded.modules, &sample_unresolved, api_set_ctx, {});
+        if (resolved.has_value()) {
+            fixups = std::move(*resolved);
+        }
+    }
+    register_import_intercepts(fixups, loaded.modules, loaded.intercepts);
+    // Bind-then-map: the map bytes are the bound final images, never a
+    // pre-binding copy.
+    for (const auto& module : loaded.modules) {
+        loaded.maps.emplace_back(module.base, module.image);
+    }
+    return loaded;
+}
+
 // The world-building stage's product: the export index, the attribution
 // records, and the TEB/PEB/Ldr environment the finish section assembles the
 // PreparedGuest from.
@@ -128,28 +644,45 @@ std::expected<LoadedSnapshot, RebuildFailure> load_snapshot_stream(std::istream&
     LoadedSnapshot loaded;
     auto header = reader.read_header();
     if (!header) {
-        return std::unexpected(header.error() == snapshot::Error::kBitnessMismatch
-                                   ? failure(RebuildError::kBitnessUnsupported)
-                                   : failure(RebuildError::kBadSnapshot));
+        return std::unexpected(
+            header.error() == snapshot::Error::kBitnessMismatch
+                ? failure(RebuildError::kBitnessUnsupported)
+                : failure(RebuildError::kBadSnapshot,
+                          std::string{"header: "} +
+                              std::string{snapshot::error_message(header.error())}));
     }
     loaded.header = *header;
     auto registers = reader.read_registers();
     if (!registers) {
-        return std::unexpected(failure(RebuildError::kBadSnapshot));
+        return std::unexpected(failure(
+            RebuildError::kBadSnapshot,
+            std::string{"registers: "} + std::string{snapshot::error_message(registers.error())}));
     }
     loaded.registers = *registers;
     auto metadata = reader.read_metadata();
     if (!metadata) {
-        return std::unexpected(failure(RebuildError::kBadSnapshot));
+        return std::unexpected(failure(RebuildError::kBadSnapshot,
+                                       std::string{"metadata: "} +
+                                           std::string{snapshot::error_message(metadata.error())}));
     }
     loaded.metadata = *metadata;
     for (std::uint32_t i = 0; i < loaded.header.region_count; ++i) {
         auto region = reader.read_region();
         if (!region) {
-            return std::unexpected(failure(RebuildError::kBadSnapshot));
+            return std::unexpected(
+                failure(RebuildError::kBadSnapshot,
+                        std::format("region {}: {}", i, snapshot::error_message(region.error()))));
         }
         loaded.regions.push_back(std::move(*region));
     }
+    // the bilateral directory-mode check runs before anything maps: a
+    // damaged or one-sided container is the named rejection, a legacy
+    // container keeps its route
+    auto replay_metadata = inspect_replay_metadata(loaded.regions);
+    if (!replay_metadata.has_value()) {
+        return std::unexpected(replay_metadata.error());
+    }
+    loaded.replay_metadata = std::move(*replay_metadata);
     // v2 carries exactly one pending-module block (the DLL-input route's
     // sample bytes); a v2 file that ends before it, or a malformed block, is
     // not a loadable container. A second physical block (or any trailing
@@ -357,13 +890,31 @@ std::expected<PreparedGuest, RebuildFailure> prepare_guest_stream(std::istream& 
     PreparedGuest guest{std::move(unicorn),          mode,
                         std::move(loaded->metadata), std::move(map),
                         std::move(images),           std::move(region_records)};
+    if (loaded->replay_metadata.has_value()) {
+        guest.directory_metadata = std::move(*loaded->replay_metadata);
+    }
     // v2 containers carry the DLL-input route's pending module: hand it to
     // the guest and rebuild the loader tables from the photographed world
     // - the synthetic load consumes both at run time.
+    // the directory-mode attach runs first and needs no pending block: the
+    // EXE/shellcode/DLL container types all restore their full run tables
+    // before execution; a pending block on top composes (the resident-world
+    // attach passes through when the tables already exist)
+    if (guest.directory_metadata.has_value()) {
+        if (const auto restored = attach_directory_world(guest); !restored.has_value()) {
+            return std::unexpected(
+                failure(RebuildError::kBadSnapshot,
+                        std::string{"directory-world attach rejected: "} +
+                            std::string{syscall_run_error_message(restored.error())}));
+        }
+    }
     if (loaded->pending.has_value()) {
         guest.pending = std::move(loaded->pending);
         if (const auto attached = attach_resident_world(guest); !attached.has_value()) {
-            return std::unexpected(failure(RebuildError::kBadSnapshot));
+            return std::unexpected(
+                failure(RebuildError::kBadSnapshot,
+                        std::string{"resident-world attach rejected: "} +
+                            std::string{syscall_run_error_message(attached.error())}));
         }
     }
     return guest;
@@ -390,8 +941,16 @@ std::expected<PreparedGuest, RebuildFailure> prepare_guest_stream(std::istream& 
 // the intercepted (VA, handler id) pairs.
 std::expected<LoadedSystemModules, RebuildFailure>
 load_system_modules(const GuestMode mode, const std::filesystem::path& synthetic_module_dir,
-                    std::vector<std::uint8_t>& image)
+                    std::vector<std::uint8_t>& image,
+                    const std::filesystem::path& system_modules_dir,
+                    const bool system_modules_fallback)
 {
+    // Directory mode: the strict source tiers, no host system directories,
+    // no silent synthetic mixing.
+    if (!system_modules_dir.empty()) {
+        return load_directory_system_modules(mode, system_modules_dir, system_modules_fallback,
+                                             synthetic_module_dir, image);
+    }
     LoadedSystemModules loaded;
     // one resident module: map its bytes at the fixed base, relocate by the
     // base delta, and index the exports (resolve_imports below and the
@@ -399,6 +958,7 @@ load_system_modules(const GuestMode mode, const std::filesystem::path& synthetic
     auto& system_modules = loaded.modules;
     auto& system_maps = loaded.maps;
     auto& intercepts = loaded.intercepts;
+    auto& system_sources = loaded.sources;
     // system modules: real host system images
     // at fixed high addresses, RWX, relocated by their own delta. Their
     // bytes are retained host-side for import resolution and the
@@ -440,6 +1000,9 @@ load_system_modules(const GuestMode mode, const std::filesystem::path& synthetic
         loaded.image = std::move(*module_image);
         std::memcpy(loaded.name.data(), folded_name.data(), folded_name.size());
         static_cast<void>(loader::index_exports(loaded));
+        system_sources.emplace_back(std::string(folded_name), synthetic_module_dir.empty()
+                                                                  ? SystemModuleSource::kHostSystem
+                                                                  : SystemModuleSource::kSynthetic);
         system_modules.push_back(std::move(loaded));
         system_maps.emplace_back(fixed_base, system_modules.back().image);
         return {};
@@ -535,17 +1098,7 @@ load_system_modules(const GuestMode mode, const std::filesystem::path& synthetic
     // intercepted-API bookkeeping: a resolved import whose final name is in
     // the intercept set hooks that function entry (VA + stable handler id)
     if (fixups.has_value()) {
-        for (const auto& fixup : *fixups) {
-            for (const auto& system : system_modules) {
-                for (const auto& [name, va] : system.exports) {
-                    if (va == fixup.resolved) {
-                        if (const auto id = intercept_id_for(name)) {
-                            intercepts.emplace_back(fixup.resolved, *id);
-                        }
-                    }
-                }
-            }
-        }
+        register_import_intercepts(*fixups, system_modules, intercepts);
     }
     return loaded;
 }
@@ -727,11 +1280,25 @@ build_loader_world(UnicornEngine& unicorn, const GuestMode mode, const LoadedSys
     }
 
     // loader tables: the exports indexed at load time feed the
-    // interception layer's GetProcAddress/LoadLibrary lookups
-
+    // interception layer's GetProcAddress/LoadLibrary lookups. Forwarder
+    // entries resolve through the resident set to their final callable VA —
+    // a host calling GetProcAddress must never receive a string RVA as
+    // code. Synthetic modules carry no forwarders; real directory modules
+    // (real export tables) do.
+    loader::ApiSetContext export_ctx;
+    if (!loaded.apiset_file_bytes.empty()) {
+        export_ctx.mode = loader::ApiSetContext::Mode::kDirectoryMap;
+        export_ctx.directory_map = &loaded.api_set_map;
+    }
     for (const auto& system : system_modules) {
         for (const auto& [name, va] : system.exports) {
-            loader_exports.push_back({system.base, va, name});
+            static_cast<void>(va);
+            const auto resolved =
+                loader::resolve_export(system_modules, std::string_view(system.name.data()), name,
+                                       export_ctx, std::string_view(system.name.data()));
+            if (resolved.ok) {
+                loader_exports.push_back({system.base, resolved.va, name});
+            }
         }
     }
 
@@ -859,7 +1426,8 @@ seed_wow64_transition(UnicornEngine& unicorn, const GuestMode mode,
 
 std::expected<PreparedGuest, RebuildFailure>
 prepare_pe_file(const std::filesystem::path& path, bool fidelity_seams,
-                const std::filesystem::path& synthetic_module_dir)
+                const std::filesystem::path& synthetic_module_dir,
+                const std::filesystem::path& system_modules_dir, const bool system_modules_fallback)
 {
     std::ifstream in(path, std::ios::binary);
     if (!in) {
@@ -880,7 +1448,8 @@ prepare_pe_file(const std::filesystem::path& path, bool fidelity_seams,
     // The image is remapped when its declared base cannot survive a 32-bit
     // slot (see kLoaderSampleBase); the delta repairs every relocated pointer
     // and PEB.ImageBase / metadata follow the mapped base below.
-    const auto mapped_base = (!synthetic_module_dir.empty() && info->image_base > 0xFFFFFFFFULL)
+    const auto mapped_base = ((!synthetic_module_dir.empty() || !system_modules_dir.empty()) &&
+                              info->image_base > 0xFFFFFFFFULL)
                                  ? kLoaderSampleBase
                                  : info->image_base;
     const auto base_delta = mapped_base - info->image_base;
@@ -890,11 +1459,30 @@ prepare_pe_file(const std::filesystem::path& path, bool fidelity_seams,
         callbacks = std::vector<std::uint64_t>{};
     }
 
-    auto system_loaded = load_system_modules(mode, synthetic_module_dir, *image);
+    auto system_loaded = load_system_modules(mode, synthetic_module_dir, *image, system_modules_dir,
+                                             system_modules_fallback);
     if (!system_loaded.has_value()) {
         return std::unexpected(system_loaded.error());
     }
+    // the directory mode's whole-interval overlap gate: modules, sample and
+    // fixed regions must be pairwise disjoint, not merely distinct-based
+    if (!system_modules_dir.empty()) {
+        if (const auto overlap = find_directory_range_overlap(system_loaded->modules, mode,
+                                                              mapped_base, info->image_size);
+            overlap.has_value()) {
+            return std::unexpected(
+                failure(RebuildError::kBadSnapshot,
+                        std::format("directory-mode mapping ranges overlap: {} and {}",
+                                    overlap->first, overlap->second)));
+        }
+    }
     auto& intercepts = system_loaded->intercepts;
+    // directory-mode whitelist/trap locals: the metadata block fills them,
+    // the guest handoff below consumes them
+    std::vector<LoaderExportEntry> guest_stub_whitelist;
+    std::vector<std::uint64_t> guest_boundary_trap_vas;
+    std::map<std::uint64_t, std::tuple<std::string, std::string, std::uint32_t>>
+        guest_boundary_trap_names;
     auto unicorn_result =
         map_loader_address_space(mode, mapped_base, info->image_size, *image, *system_loaded);
     if (!unicorn_result.has_value()) {
@@ -918,6 +1506,128 @@ prepare_pe_file(const std::filesystem::path& path, bool fidelity_seams,
             seed_wow64_transition(unicorn, mode, *system_loaded, synthetic_module_dir, teb_va);
         !wow64.has_value()) {
         return std::unexpected(wow64.error());
+    }
+    // Directory mode: the versioned metadata region at its fixed base - the
+    // module source table, the actual boundary dispositions, the intercept
+    // registrations, the counting whitelist and the complete embedded API
+    // Set map. Read-only MEM_PRIVATE region, no host paths, capacity-capped
+    // at encode time. The e_res2 marker the derived ntdll carries points
+    // here; the replay-side bilateral check reads both (design D6).
+    if (!system_modules_dir.empty()) {
+        namespace bm = boundary_metadata;
+        bm::MetadataInput meta;
+        // the counting whitelist (event-ledger source rules): derived compat
+        // entries plus every fallback synthetic module's exports; trap
+        // dispositions join the named stop points (klass 255 rows keep the
+        // trap names in the record without joining the count set)
+        for (const auto& [name, dispositions] : system_loaded->boundary_dispositions) {
+            const auto module =
+                std::find_if(system_loaded->modules.begin(), system_loaded->modules.end(),
+                             [&name](const loader::LoadedModule& m) {
+                                 return std::string_view(m.name.data()) == name;
+                             });
+            if (module == system_loaded->modules.end()) {
+                continue;
+            }
+            for (const auto& disposition : dispositions) {
+                if (disposition.name.empty()) {
+                    // unnamed EAT slots carry no name-keyed row: the record's
+                    // counters restore by (module, name), which an empty name
+                    // can never match on replay - the body's disposition
+                    // still rides the image (ud2 for a trap), only the named
+                    // stop-point row is absent
+                    continue;
+                }
+                if (disposition.kind == loader::BoundaryKind::kTrap) {
+                    guest_boundary_trap_vas.push_back(module->base + disposition.body_rva);
+                    guest_boundary_trap_names.emplace(
+                        module->base + disposition.body_rva,
+                        std::make_tuple(name, disposition.name, disposition.ordinal));
+                    meta.counters.push_back({name, disposition.name, 255});
+                } else if (disposition.kind == loader::BoundaryKind::kCompat) {
+                    guest_stub_whitelist.push_back(
+                        {module->base, module->base + disposition.body_rva, disposition.name});
+                    meta.counters.push_back({name, disposition.name, 0});
+                }
+            }
+        }
+        // fallback synthetic modules count under the existing synthetic rule
+        // (every export); their rows re-derive at replay from the source
+        // table's kFallbackSynthetic marks, so the payload stays bounded
+        for (std::size_t i = 0; i < system_loaded->modules.size(); ++i) {
+            if (system_loaded->sources[i].second != SystemModuleSource::kFallbackSynthetic) {
+                continue;
+            }
+            const auto& module = system_loaded->modules[i];
+            for (const auto& [export_name, va] : module.exports) {
+                guest_stub_whitelist.push_back({module.base, va, export_name});
+            }
+        }
+        meta.modules.resize(system_loaded->modules.size());
+        for (std::size_t i = 0; i < system_loaded->modules.size(); ++i) {
+            const auto& module = system_loaded->modules[i];
+            auto& record = meta.modules[i];
+            record.name = std::string(std::string_view(module.name.data()));
+            record.base = module.base;
+            record.size = static_cast<std::uint32_t>(module.image.size());
+            record.source = static_cast<std::uint8_t>(system_loaded->sources[i].second);
+            record.image_xxhash64 = system_loaded->image_hashes[i];
+        }
+        for (const auto& [name, dispositions] : system_loaded->boundary_dispositions) {
+            const auto module =
+                std::find_if(system_loaded->modules.begin(), system_loaded->modules.end(),
+                             [&name](const loader::LoadedModule& m) {
+                                 return std::string_view(m.name.data()) == name;
+                             });
+            if (module == system_loaded->modules.end()) {
+                return std::unexpected(
+                    failure(RebuildError::kBadSnapshot,
+                            std::format("{}: boundary record lost its module", name)));
+            }
+            bm::BoundaryRecord record;
+            record.name = name;
+            record.exports.reserve(dispositions.size());
+            for (const auto& disposition : dispositions) {
+                record.exports.push_back({disposition.name, disposition.ordinal,
+                                          static_cast<std::uint8_t>(disposition.kind),
+                                          module->base + disposition.body_rva,
+                                          disposition.syscall_number});
+            }
+            meta.boundaries.push_back(std::move(record));
+        }
+        meta.intercepts.reserve(system_loaded->intercepts.size());
+        for (const auto& [va, id] : system_loaded->intercepts) {
+            meta.intercepts.push_back({va, id});
+        }
+        std::sort(meta.intercepts.begin(), meta.intercepts.end(),
+                  [](const bm::InterceptRecord& a, const bm::InterceptRecord& b) {
+                      return a.va != b.va ? a.va < b.va : a.id < b.id;
+                  });
+        meta.apiset_bytes = system_loaded->apiset_file_bytes;
+        meta.apiset_anchor = system_loaded->apiset_anchor;
+        const auto payload = bm::encode(meta);
+        if (!payload.has_value()) {
+            return std::unexpected(
+                failure(RebuildError::kBadSnapshot,
+                        std::format("boundary metadata rejected: {} ({})",
+                                    boundary_metadata::metadata_error_message(payload.error().code),
+                                    payload.error().detail)));
+        }
+        if (uc_mem_map(unicorn.get(), bm::kMetadataBase,
+                       static_cast<std::size_t>(bm::kMetadataMaxBytes),
+                       UC_PROT_READ) != UC_ERR_OK ||
+            uc_mem_write(unicorn.get(), bm::kMetadataBase, payload->data(), payload->size()) !=
+                UC_ERR_OK) {
+            return std::unexpected(failure(RebuildError::kUnicornFailure));
+        }
+        world->regions.push_back(mem_region::RegionRecord{
+            bm::kMetadataBase, static_cast<std::uint32_t>(bm::kMetadataMaxBytes), 0x02,
+            kMemPrivate});
+        // the region readers binary-search; the metadata record joins sorted
+        std::sort(world->regions.begin(), world->regions.end(),
+                  [](const mem_region::RegionRecord& a, const mem_region::RegionRecord& b) {
+                      return a.base < b.base;
+                  });
     }
     snapshot::Metadata metadata;
     metadata.entry_address = base + info->entry_rva;
@@ -954,6 +1664,14 @@ prepare_pe_file(const std::filesystem::path& path, bool fidelity_seams,
                         std::move(intercepts),
                         std::move(world->module_entry_vas)};
     guest.loader_route = true; // synthetic Ldr: LdrLoadDll misses stay answered
+    // directory-mode world facts: empty in the synthetic/host routes
+    guest.directory_mode = !system_modules_dir.empty();
+    guest.module_sources = std::move(system_loaded->sources);
+    guest.boundary_rules = std::move(system_loaded->boundary_rules);
+    guest.api_set_map = std::move(system_loaded->api_set_map);
+    guest.stub_whitelist = std::move(guest_stub_whitelist);
+    guest.boundary_trap_vas = std::move(guest_boundary_trap_vas);
+    guest.boundary_trap_names = std::move(guest_boundary_trap_names);
     return guest;
 }
 
@@ -1072,6 +1790,132 @@ std::vector<std::uint64_t> read_tls_callbacks(uc_engine* const uc, const std::ui
 
 } // namespace
 
+std::optional<std::pair<std::string, std::string>>
+find_directory_range_overlap(const std::span<const loader::LoadedModule> modules,
+                             const GuestMode mode, const std::uint64_t sample_base,
+                             const std::uint64_t sample_size)
+{
+    // every interval the constructed world maps, whole-range: the resident
+    // modules, the sample image, and the fixed environment regions (the
+    // allocator bump range covers the run-time trampoline/allocations)
+    struct Interval {
+        std::uint64_t lo;
+        std::uint64_t hi; // exclusive
+        std::string name;
+    };
+    std::vector<Interval> intervals;
+    intervals.reserve(modules.size() + 8);
+    for (const auto& module : modules) {
+        intervals.push_back({module.base, module.base + module.image.size(),
+                             std::string(std::string_view(module.name.data()))});
+    }
+    intervals.push_back({sample_base, sample_base + sample_size, "<sample image>"});
+    intervals.push_back({boundary_metadata::kMetadataBase,
+                         boundary_metadata::kMetadataBase + boundary_metadata::kMetadataMaxBytes,
+                         "<boundary metadata>"});
+    intervals.push_back({0, kLoaderNullBytes, "<null range>"});
+    intervals.push_back({kLoaderKUser, kLoaderKUser + 0x1000, "<kuser>"});
+    const auto& layout = layout_for(mode);
+    intervals.push_back({layout.stack_base, layout.stack_base + layout.stack_size, "<stack>"});
+    intervals.push_back({layout.heap_base, layout.heap_base + layout.heap_size, "<heap>"});
+    intervals.push_back(
+        {layout.env_base, layout.env_base + layout.env_block_size, "<environment>"});
+    // the allocator's construction-time reservation: the SEH trampoline page
+    // block the run maps first (the bump range grows at run time, and the
+    // fixed heap/environment sit inside the nominal range)
+    intervals.push_back({layout.alloc_base, layout.alloc_base + 0x21000, "<alloc range>"});
+    if (mode == GuestMode::kX86) {
+        intervals.push_back({kX86GdtBase, kX86GdtBase + kX86GdtSize, "<gdt>"});
+        intervals.push_back({kLoaderWow64StubBase, kLoaderWow64StubBase + 0x1000, "<wow64 stub>"});
+    }
+    // zero-size intervals claim nothing and cannot overlap
+    intervals.erase(std::remove_if(intervals.begin(), intervals.end(),
+                                   [](const Interval& i) { return i.hi <= i.lo; }),
+                    intervals.end());
+    std::sort(intervals.begin(), intervals.end(),
+              [](const Interval& a, const Interval& b) { return a.lo < b.lo; });
+    for (std::size_t i = 1; i < intervals.size(); ++i) {
+        if (intervals[i].lo < intervals[i - 1].hi) {
+            return std::make_pair(intervals[i - 1].name, intervals[i].name);
+        }
+    }
+    return std::nullopt;
+}
+
+std::expected<std::optional<boundary_metadata::MetadataInput>, RebuildFailure>
+inspect_replay_metadata(const std::vector<snapshot::Region>& regions)
+{
+    namespace bm = boundary_metadata;
+    // side one: the fixed metadata region
+    const snapshot::Region* meta_region = nullptr;
+    for (const auto& region : regions) {
+        if (region.header.base_address == bm::kMetadataBase) {
+            if (region.header.content != snapshot::kContentPresent) {
+                // a mapped-but-absent record: the payload was deleted
+                meta_region = &region;
+                break;
+            }
+            meta_region = &region;
+            break;
+        }
+    }
+    // side two: the derived ntdll's e_res2 marker (the directory world maps
+    // its boundary ntdll at the first reserved base)
+    std::optional<std::uint64_t> marker_va;
+    bool marker_side_present = false;
+    for (const auto& region : regions) {
+        if (region.header.base_address != kBases64[0] ||
+            region.header.content != snapshot::kContentPresent || region.content.size() < 0x1000) {
+            continue;
+        }
+        auto marked = bm::read_marker(std::span<const std::uint8_t>(region.content.data(), 0x1000));
+        if (marked.has_value()) {
+            // a value: the marked ntdll; nullopt: checked, unmarked image
+            if (marked->has_value()) {
+                marker_side_present = true;
+                marker_va = **marked;
+            }
+        } else if (marked.error().code != bm::MetadataError::kBadMarker) {
+            return std::unexpected(
+                failure(RebuildError::kBadSnapshot,
+                        std::format("replay mode marker rejected: {} ({})",
+                                    bm::metadata_error_message(marked.error().code),
+                                    marked.error().detail)));
+        }
+        break; // one region carries the ntdll's first page
+    }
+    if (meta_region == nullptr && !marker_side_present) {
+        return std::nullopt; // both sides absent: the legacy route
+    }
+    if (meta_region == nullptr) {
+        return std::unexpected(failure(RebuildError::kBadSnapshot,
+                                       "directory-mode marker present but the metadata "
+                                       "region is missing"));
+    }
+    if (!marker_side_present) {
+        return std::unexpected(failure(RebuildError::kBadSnapshot,
+                                       "directory-mode metadata region present but the "
+                                       "ntdll mode marker is missing"));
+    }
+    if (meta_region->header.content != snapshot::kContentPresent) {
+        return std::unexpected(failure(RebuildError::kBadSnapshot,
+                                       "directory-mode metadata region carries no record"));
+    }
+    if (marker_va != bm::kMetadataBase) {
+        return std::unexpected(failure(
+            RebuildError::kBadSnapshot,
+            std::format("mode marker points at 0x{:x}, not the metadata base", *marker_va)));
+    }
+    auto decoded = bm::decode(meta_region->content);
+    if (!decoded.has_value()) {
+        return std::unexpected(failure(RebuildError::kBadSnapshot,
+                                       std::format("directory-mode metadata rejected: {} ({})",
+                                                   bm::metadata_error_message(decoded.error().code),
+                                                   decoded.error().detail)));
+    }
+    return std::optional(std::move(*decoded));
+}
+
 std::vector<std::uint64_t> synthetic_world_bases(const GuestMode mode,
                                                  const std::filesystem::path& module_dir)
 {
@@ -1111,12 +1955,21 @@ std::size_t count_synthetic_module_pages(std::span<const mem_region::ModuleImage
     return hits;
 }
 
-// Forward: the shared table rebuild, defined after this function.
-std::expected<void, SyscallRunError> reattach_tables_from_images(PreparedGuest& guest);
+// Forward: the shared table rebuild, defined after this function. The
+// optional API Set context carries the directory map into forwarder-chain
+// resolution (a real system module's forwarders can target api-set names).
+std::expected<void, SyscallRunError>
+reattach_tables_from_images(PreparedGuest& guest, const loader::ApiSetContext* api_set_ctx);
 
 std::expected<bool, SyscallRunError>
 reattach_synthetic_world(PreparedGuest& guest, const std::filesystem::path& synthetic_module_dir)
 {
+    // a directory-mode container sits on the same fixed bases and must never
+    // be re-hooked as the synthetic world: its bilateral marks say so, and
+    // its tables were already restored at rebuild time
+    if (guest.directory_metadata.has_value()) {
+        return false;
+    }
     const auto bases = synthetic_world_bases(guest.guest_mode, synthetic_module_dir);
     // A single exact coincidence is not the synthetic world. Replay with a
     // directory present (the CLI locates one on every non-Windows run, so a
@@ -1138,7 +1991,8 @@ reattach_synthetic_world(PreparedGuest& guest, const std::filesystem::path& synt
     guest.intercepts.clear();
     guest.ldr_entry_vas.clear();
     guest.tls_callbacks.clear();
-    if (const auto reattached = reattach_tables_from_images(guest); !reattached.has_value()) {
+    if (const auto reattached = reattach_tables_from_images(guest, nullptr);
+        !reattached.has_value()) {
         return std::unexpected(reattached.error());
     }
     guest.loader_route = true;
@@ -1149,7 +2003,8 @@ reattach_synthetic_world(PreparedGuest& guest, const std::filesystem::path& synt
 // export index (with interception registration), Ldr entry VAs and the main
 // image's TLS callbacks. Callers pre-clear the tables and decide the
 // route semantics (synthetic vs resident) themselves.
-std::expected<void, SyscallRunError> reattach_tables_from_images(PreparedGuest& guest)
+std::expected<void, SyscallRunError>
+reattach_tables_from_images(PreparedGuest& guest, const loader::ApiSetContext* api_set_ctx)
 {
     const auto uc = guest.unicorn.get();
     // Pass 1: byte-complete module views (the forwarder-capable resolver
@@ -1176,11 +2031,16 @@ std::expected<void, SyscallRunError> reattach_tables_from_images(PreparedGuest& 
     // a GetProcAddress caller must never receive a forwarder-string RVA as
     // code. The lookup key keeps the owning module (caller-side handle),
     // the registered VA is the callable endpoint.
+    // a directory context means forwarder chains can target api-set names
+    // (real system modules do); the synthetic routes keep the prefix rules
+    const loader::ApiSetContext synthetic_ctx{};
+    const loader::ApiSetContext& ctx = api_set_ctx != nullptr ? *api_set_ctx : synthetic_ctx;
     for (const auto& module : guest.loaded_modules) {
         for (const auto& [name, unresolvered_va] : module.exports) {
             static_cast<void>(unresolvered_va);
-            const auto resolved = loader::resolve_export(
-                guest.loaded_modules, std::string_view(module.name.data()), name);
+            const auto resolved =
+                loader::resolve_export(guest.loaded_modules, std::string_view(module.name.data()),
+                                       name, ctx, std::string_view(module.name.data()));
             if (!resolved.ok || resolved.module == nullptr) {
                 continue; // unresolvable forwarder: not callable, skip
             }
@@ -1206,6 +2066,157 @@ std::expected<void, SyscallRunError> reattach_tables_from_images(PreparedGuest& 
     return {};
 }
 
+// The directory-mode replay attach (design D6): the same registration logic
+// the construction used - the tables rebuild from the guest's own images
+// through reattach_tables_from_images, the API Set map reloads from the
+// embedded record, the source table and boundary rules restore from the
+// metadata - and every restored table is verified against the record. An
+// incomplete restoration is the named rejection, never a half-attached run.
+std::expected<void, SyscallRunError> attach_directory_world(PreparedGuest& guest)
+{
+    namespace bm = boundary_metadata;
+    const auto& meta = *guest.directory_metadata;
+    guest.loader_modules.clear();
+    guest.loader_exports.clear();
+    guest.intercepts.clear();
+    guest.ldr_entry_vas.clear();
+    guest.tls_callbacks.clear();
+    guest.loaded_modules.clear();
+    // the API Set map reloads FIRST (arch + anchor bound): the forwarder
+    // chains in the rebuilt export tables can target api-set names, so the
+    // context must be live before the tables resolve
+    auto map_view = loader::ApiSetMapView::load(meta.apiset_bytes, loader::kApiSetMapArchX64,
+                                                meta.apiset_anchor);
+    if (!map_view.has_value()) {
+        return std::unexpected(SyscallRunError::kBadSnapshot);
+    }
+    guest.api_set_map = std::move(*map_view);
+    const loader::ApiSetContext api_set_ctx = [&] {
+        loader::ApiSetContext ctx;
+        ctx.mode = loader::ApiSetContext::Mode::kDirectoryMap;
+        ctx.directory_map = &guest.api_set_map;
+        return ctx;
+    }();
+    if (const auto reattached = reattach_tables_from_images(guest, &api_set_ctx);
+        !reattached.has_value()) {
+        return std::unexpected(reattached.error());
+    }
+    // the module records must match the restored resident set (the sample
+    // image joins the Ldr set but carries no metadata record)
+    for (const auto& record : meta.modules) {
+        const auto found = std::find_if(guest.loader_modules.begin(), guest.loader_modules.end(),
+                                        [&record](const mem_region::ModuleRecord& m) {
+                                            return m.base == record.base && m.size == record.size &&
+                                                   fold_name(std::string_view(m.name.data())) ==
+                                                       fold_name(record.name);
+                                        });
+        if (found == guest.loader_modules.end()) {
+            sheller::log::write(
+                sheller::log::level::kWarning,
+                std::format("attach-directory: module record missing: {}", record.name));
+            return std::unexpected(SyscallRunError::kBadSnapshot);
+        }
+    }
+    // the recorded intercept registrations must all be covered by the
+    // rebuilt table (the rebuilt set is the name-driven superset)
+    for (const auto& recorded : meta.intercepts) {
+        const auto found = std::find_if(
+            guest.intercepts.begin(), guest.intercepts.end(), [&recorded](const auto& registered) {
+                return registered.first == recorded.va && registered.second == recorded.id;
+            });
+        if (found == guest.intercepts.end()) {
+            sheller::log::write(sheller::log::level::kWarning,
+                                std::format("attach-directory: intercept missing: va={:#x} id={}",
+                                            recorded.va, recorded.id));
+            return std::unexpected(SyscallRunError::kBadSnapshot);
+        }
+    }
+    // the counting whitelist and trap stop points restore from the record,
+    // resolved against the rebuilt tables (a counter or trap whose export
+    // no longer resolves is an incomplete restoration)
+    guest.stub_whitelist.clear();
+    guest.boundary_trap_vas.clear();
+    guest.boundary_trap_names.clear();
+    // module base -> folded name, for matching the record's rows
+    std::map<std::uint64_t, std::string> module_names;
+    for (const auto& module : guest.loader_modules) {
+        module_names.emplace(module.base, fold_name(std::string_view(module.name.data())));
+    }
+    for (const auto& counter : meta.counters) {
+        const auto folded_module = fold_name(counter.module);
+        const auto entry =
+            std::find_if(guest.loader_exports.begin(), guest.loader_exports.end(),
+                         [&](const LoaderExportEntry& candidate) {
+                             const auto owner = module_names.find(candidate.module_base);
+                             return owner != module_names.end() && owner->second == folded_module &&
+                                    candidate.name == counter.name;
+                         });
+        if (entry == guest.loader_exports.end()) {
+            sheller::log::write(sheller::log::level::kWarning,
+                                std::format("attach-directory: counter export missing: {}!{}",
+                                            counter.module, counter.name));
+            return std::unexpected(SyscallRunError::kBadSnapshot); // incomplete restoration
+        }
+        if (counter.klass == 255) {
+            // a trap row: the named stop point (ordinal from the record)
+            std::uint32_t ordinal = 0;
+            for (const auto& boundary : meta.boundaries) {
+                if (fold_name(boundary.name) != folded_module) {
+                    continue;
+                }
+                for (const auto& exported : boundary.exports) {
+                    if (exported.name == counter.name) {
+                        ordinal = exported.ordinal;
+                    }
+                }
+            }
+            guest.boundary_trap_vas.push_back(entry->function_va);
+            guest.boundary_trap_names.emplace(
+                entry->function_va, std::make_tuple(folded_module, counter.name, ordinal));
+            continue;
+        }
+        guest.stub_whitelist.push_back(*entry);
+    }
+    // the source table and the boundary rules restore from the record (the
+    // rules re-derive from the build-pinned manifest over the recorded
+    // source-image hashes)
+    guest.module_sources.clear();
+    guest.boundary_rules.clear();
+    for (const auto& record : meta.modules) {
+        guest.module_sources.emplace_back(record.name,
+                                          static_cast<SystemModuleSource>(record.source));
+        auto rules =
+            BoundaryManifest::committed().rules_for(record.name, "x64", record.image_xxhash64);
+        if (rules.has_value()) {
+            guest.boundary_rules.emplace(record.name, std::move(*rules));
+        }
+    }
+    // fallback synthetic modules: the source table's kFallbackSynthetic
+    // marks re-derive their whitelist rows (the existing synthetic rule -
+    // every export counts); they never persist in the record
+    for (const auto& [name, source] : guest.module_sources) {
+        if (source != SystemModuleSource::kFallbackSynthetic) {
+            continue;
+        }
+        const auto found =
+            std::find_if(guest.loader_modules.begin(), guest.loader_modules.end(),
+                         [&name](const mem_region::ModuleRecord& m) {
+                             return fold_name(std::string_view(m.name.data())) == fold_name(name);
+                         });
+        if (found == guest.loader_modules.end()) {
+            return std::unexpected(SyscallRunError::kBadSnapshot);
+        }
+        for (const auto& entry : guest.loader_exports) {
+            if (entry.module_base == found->base) {
+                guest.stub_whitelist.push_back(entry);
+            }
+        }
+    }
+    guest.directory_mode = true;
+    guest.loader_route = true;
+    return {};
+}
+
 // DLL-input route (photographed-world container, Windows capture):
 // arrives with no loader tables - the rebuild fills images only. This
 // rebuilds loader_modules/loader_exports/intercepts/ldr_entry_vas from the
@@ -1221,7 +2232,8 @@ std::expected<bool, SyscallRunError> attach_resident_world(PreparedGuest& guest)
     if (!guest.loader_modules.empty() || !guest.loader_exports.empty()) {
         return false; // construction already attached its tables
     }
-    if (const auto reattached = reattach_tables_from_images(guest); !reattached.has_value()) {
+    if (const auto reattached = reattach_tables_from_images(guest, nullptr);
+        !reattached.has_value()) {
         return std::unexpected(reattached.error());
     }
     return true;

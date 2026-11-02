@@ -109,12 +109,18 @@ finish_run(const engine::SyscallRunFailure* engine_failure, AnalysisArtifacts ar
     case engine::SyscallRunError::kBadSnapshot:
     case engine::SyscallRunError::kBitnessUnsupported:
     case engine::SyscallRunError::kInconsistent:
-    case engine::SyscallRunError::kUnalignedRegion:
+    case engine::SyscallRunError::kUnalignedRegion: {
         artifacts.run_stats = std::nullopt; // the run never started
-        return std::unexpected(snapshot_io_failure(
-            "snapshot rejected: " +
-                std::string{engine::syscall_run_error_message(engine_failure->error)},
-            std::move(artifacts)));
+        // The engine's named rejection detail (module!reason wording) leads
+        // the message when it exists; the enum spelling alone names nothing.
+        std::string message = "snapshot rejected: ";
+        message += engine::syscall_run_error_message(engine_failure->error);
+        if (!engine_failure->detail.empty()) {
+            message += ": ";
+            message += engine_failure->detail;
+        }
+        return std::unexpected(snapshot_io_failure(std::move(message), std::move(artifacts)));
+    }
     // The container carries synthetic module pages but the replay was given
     // no directory: a capture-class failure, never a silent un-instrumented
     // run.
@@ -129,8 +135,15 @@ finish_run(const engine::SyscallRunFailure* engine_failure, AnalysisArtifacts ar
     AnalysisFailure out;
     out.kind = AnalysisFailure::Kind::kRun;
     out.run = *engine_failure;
-    out.message = std::string{engine::syscall_run_error_message(engine_failure->error)};
-    out.message += " (syscalls=" + std::to_string(engine_failure->stats.syscalls) +
+    // The boundary-trap stop carries its named diagnosis in the failure's
+    // detail; it leads the message so the report names module!export and
+    // the call site, not a bare enum spelling.
+    if (!engine_failure->detail.empty()) {
+        out.message = engine_failure->detail + " (";
+    } else {
+        out.message = std::string{engine::syscall_run_error_message(engine_failure->error)} + " (";
+    }
+    out.message += "syscalls=" + std::to_string(engine_failure->stats.syscalls) +
                    " rejects=" + std::to_string(engine_failure->stats.rejects) +
                    " blocks=" + std::to_string(engine_failure->stats.blocks) + ")";
     out.artifacts = std::move(artifacts);
@@ -162,6 +175,19 @@ std::expected<AnalysisArtifacts, AnalysisFailure> run_snapshot(const SnapshotT& 
     }
 
     engine::SyscallRunOptions run = options.run;
+    // The module source table rides every run: capture rows here (chaining
+    // any host-installed sink) and stamp the artifacts with them.
+    std::vector<AnalysisModuleSource> module_sources;
+    {
+        auto host_sink = run.module_source_sink;
+        run.module_source_sink = [&module_sources, host_sink](const std::string_view module,
+                                                              const std::string_view source) {
+            module_sources.push_back({std::string(module), std::string(source)});
+            if (host_sink) {
+                host_sink(module, source);
+            }
+        };
+    }
     api::detail::EventStream stream(wiring.rules.get(), tally, collector, ledger.get(),
                                     options.event_observer, options.event_type_mask);
     const engine::FactChannel facts =
@@ -177,11 +203,13 @@ std::expected<AnalysisArtifacts, AnalysisFailure> run_snapshot(const SnapshotT& 
         AnalysisArtifacts artifacts =
             api::detail::assemble_artifacts(tally, collector, names, ledger.get(), instrumented,
                                             std::move(note), result.value(), timeline_error);
+        artifacts.module_sources = std::move(module_sources);
         return finish_run(nullptr, std::move(artifacts), std::move(timeline_error));
     }
     AnalysisArtifacts artifacts =
         api::detail::assemble_artifacts(tally, collector, names, ledger.get(), instrumented,
                                         std::move(note), result.error().stats, timeline_error);
+    artifacts.module_sources = std::move(module_sources);
     return finish_run(&result.error(), std::move(artifacts), std::move(timeline_error));
 }
 
@@ -193,7 +221,8 @@ std::expected<AnalysisArtifacts, AnalysisFailure> run_snapshot(const SnapshotT& 
 std::expected<AnalysisArtifacts, AnalysisFailure>
 run_crafted_sample(const std::filesystem::path& input, const AnalysisOptions& options)
 {
-    if (options.run.synthetic_module_dir.empty()) {
+    const bool directory_mode = !options.run.system_modules_dir.empty();
+    if (!directory_mode && options.run.synthetic_module_dir.empty()) {
         return std::unexpected(capture_failure(capture::Status::kCaptureFailed,
                                                std::string{api::detail::kMissingSyntheticModules}));
     }
@@ -202,8 +231,9 @@ run_crafted_sample(const std::filesystem::path& input, const AnalysisOptions& op
         return std::unexpected(capture_failure(capture::Status::kNotX64Pe,
                                                std::string{api::detail::kX86SampleUnsupported}));
     }
-    auto container = engine::craft_sample_container(input, options.run.windows_fidelity_dispatch,
-                                                    options.run.synthetic_module_dir);
+    auto container = engine::craft_sample_container(
+        input, options.run.windows_fidelity_dispatch, options.run.synthetic_module_dir,
+        options.run.system_modules_dir, options.run.system_modules_fallback);
     if (!container) {
         const auto& failure = container.error();
         return std::unexpected(capture_failure(
@@ -280,6 +310,11 @@ analyze_path_impl(const std::filesystem::path& input, const AnalysisOptions& opt
                 "input carries the snapshot magic but sample routing was selected: " +
                     input.string()));
         }
+        // Directory-mode system modules construct the world on every host
+        // (the capture route cannot express a user-supplied system world).
+        if (!options.run.system_modules_dir.empty()) {
+            return run_crafted_sample(input, options);
+        }
 #ifdef _WIN32
         return run_sample_windows(input, options);
 #else
@@ -293,7 +328,11 @@ analyze_path_impl(const std::filesystem::path& input, const AnalysisOptions& opt
             return run_snapshot(input, options); // streamed, like kSnapshot
         }
         // Not (provably) a snapshot: the sample route names the precise
-        // error for unreadable or non-PE inputs.
+        // error for unreadable or non-PE inputs. Directory-mode system
+        // modules construct the world on every host.
+        if (!options.run.system_modules_dir.empty()) {
+            return run_crafted_sample(input, options);
+        }
 #ifdef _WIN32
         return run_sample_windows(input, options);
 #else

@@ -18,6 +18,10 @@ target_sources(sheller_engine PRIVATE
   guest_objects.h
   intercept.cpp
   intercept.h
+  boundary_manifest.cpp
+  boundary_manifest.h
+  boundary_metadata.cpp
+  boundary_metadata.h
   dll_loader.cpp
   dll_loader.h
   loader_route.cpp

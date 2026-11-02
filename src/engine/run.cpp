@@ -95,7 +95,7 @@ std::expected<void, SyscallRunFailure> assemble_run_state(PreparedGuest& guest,
     if (uc_mem_write(guest.unicorn.get(), guest.metadata.entry_address,
                      guest.metadata.original_entry_bytes.data(),
                      guest.metadata.original_entry_bytes.size()) != UC_ERR_OK) {
-        return std::unexpected(SyscallRunFailure{SyscallRunError::kUnicornFailure});
+        return std::unexpected(SyscallRunFailure{SyscallRunError::kUnicornFailure, {}, {}, {}});
     }
 
     state.policy = syscalls::PolicyTable{};
@@ -270,15 +270,60 @@ std::expected<void, SyscallRunFailure> assemble_run_state(PreparedGuest& guest,
         state.intercept_names.push_back(std::move(name));
         state.intercept_modules.push_back(module_index_for_va(va));
     }
-    for (const auto& entry : state.loader_exports) {
-        const auto intercepted =
-            std::find(state.intercept_vas.begin(), state.intercept_vas.end(), entry.function_va);
-        if (intercepted != state.intercept_vas.end()) {
-            continue; // intercepted exports emit apicall events, not counts
+    if (guest.directory_mode) {
+        // directory mode counts ONLY the explicit whitelist (derived compat
+        // stubs plus fallback synthetic exports) - the "every non-intercepted
+        // export is a stub" inference is a synthetic-mode rule and would
+        // miscount real bodies, data slots, syscall stubs and traps. Alias
+        // names sharing one VA land in one slot: the first whitelist row is
+        // the stable canonical name.
+        for (const auto& entry : guest.stub_whitelist) {
+            if (std::find(state.intercept_vas.begin(), state.intercept_vas.end(),
+                          entry.function_va) != state.intercept_vas.end()) {
+                continue;
+            }
+            if (state.stub_slots.find(entry.function_va) != state.stub_slots.end()) {
+                continue; // shared VA alias: one slot, one count
+            }
+            const auto slot = static_cast<std::uint32_t>(state.stub_entries.size());
+            state.stub_entries.push_back({module_index_for_va(entry.function_va), entry.name, 0});
+            state.stub_slots.emplace(entry.function_va, slot);
         }
-        const auto slot = static_cast<std::uint32_t>(state.stub_entries.size());
-        state.stub_entries.push_back({module_index_for_va(entry.function_va), entry.name, 0});
-        state.stub_slots.emplace(entry.function_va, slot);
+        state.boundary_trap_vas = guest.boundary_trap_vas;
+        state.boundary_trap_names = guest.boundary_trap_names;
+        state.directory_mode = true;
+        state.api_set_ctx.mode = loader::ApiSetContext::Mode::kDirectoryMap;
+        state.api_set_ctx.directory_map = &guest.api_set_map;
+        for (const auto va : guest.boundary_trap_vas) {
+            // an intercept registration on the same VA supersedes the trap:
+            // the engine answers the call in the hook and the ud2 body is
+            // never reached (the manifest row stays trap-classified; the
+            // interception layer is the engine support landing on it)
+            const auto intercepted =
+                std::find(state.intercept_vas.begin(), state.intercept_vas.end(), va) !=
+                state.intercept_vas.end();
+            if (intercepted) {
+                continue;
+            }
+            uc_hook trap_hook = 0;
+            if (uc_hook_add(guest.unicorn.get(), &trap_hook, UC_HOOK_CODE,
+                            reinterpret_cast<void*>(on_boundary_trap), &state, va,
+                            va) != UC_ERR_OK) {
+                return std::unexpected(
+                    SyscallRunFailure{SyscallRunError::kUnicornFailure, {}, {}, {}});
+            }
+        }
+    } else {
+        for (const auto& entry : state.loader_exports) {
+            const auto intercepted = std::find(state.intercept_vas.begin(),
+                                               state.intercept_vas.end(), entry.function_va);
+            if (intercepted != state.intercept_vas.end()) {
+                continue; // intercepted exports emit apicall events, not counts
+            }
+            const auto slot = static_cast<std::uint32_t>(state.stub_entries.size());
+            state.stub_entries.push_back({module_index_for_va(entry.function_va), entry.name, 0});
+            state.stub_slots.emplace(entry.function_va, slot);
+        }
     }
     if (static_cast<bool>(state.stub_sink) && !state.stub_entries.empty()) {
         for (const auto& mod : state.loader_modules) {
@@ -286,7 +331,8 @@ std::expected<void, SyscallRunFailure> assemble_run_state(PreparedGuest& guest,
             if (uc_hook_add(guest.unicorn.get(), &stub_hook, UC_HOOK_CODE,
                             reinterpret_cast<void*>(on_stub_code), &state, mod.base,
                             mod.base + mod.size) != UC_ERR_OK) {
-                return std::unexpected(SyscallRunFailure{SyscallRunError::kUnicornFailure});
+                return std::unexpected(
+                    SyscallRunFailure{SyscallRunError::kUnicornFailure, {}, {}, {}});
             }
         }
     }
@@ -303,7 +349,7 @@ std::expected<void, SyscallRunFailure> assemble_run_state(PreparedGuest& guest,
     // handler's return address.
     const auto seh_trampoline = run_layout.alloc_base;
     if (uc_mem_map(guest.unicorn.get(), seh_trampoline, 0x21000, UC_PROT_ALL) != UC_ERR_OK) {
-        return std::unexpected(SyscallRunFailure{SyscallRunError::kUnicornFailure});
+        return std::unexpected(SyscallRunFailure{SyscallRunError::kUnicornFailure, {}, {}, {}});
     }
     const std::uint8_t trampoline_marker = 0xCC; // int3: the INTR hook keys on the rip
     uc_mem_write(guest.unicorn.get(), seh_trampoline, &trampoline_marker, 1);
@@ -520,8 +566,8 @@ std::expected<void, SyscallRunFailure> run_tls_callback_legs(PreparedGuest& gues
         }
         tls_error = uc_emu_start(guest.unicorn.get(), callback, magic, 0, kTlsLegBudget);
         if (tls_error != UC_ERR_OK) {
-            return std::unexpected(SyscallRunFailure{SyscallRunError::kEmulationFailure,
-                                                     static_cast<std::uint32_t>(tls_error)});
+            return std::unexpected(SyscallRunFailure{
+                SyscallRunError::kEmulationFailure, static_cast<std::uint32_t>(tls_error), {}, {}});
         }
     }
     return {};
@@ -545,7 +591,7 @@ std::expected<void, SyscallRunFailure> register_run_hooks(PreparedGuest& guest,
         if (uc_hook_add(guest.unicorn.get(), &diag_code_hook, UC_HOOK_CODE,
                         reinterpret_cast<void*>(on_diag_code_window), &state,
                         options.diag_code_window_lo, options.diag_code_window_hi) != UC_ERR_OK) {
-            return std::unexpected(SyscallRunFailure{SyscallRunError::kUnicornFailure});
+            return std::unexpected(SyscallRunFailure{SyscallRunError::kUnicornFailure, {}, {}, {}});
         }
     }
 
@@ -558,7 +604,7 @@ std::expected<void, SyscallRunFailure> register_run_hooks(PreparedGuest& guest,
         if (uc_hook_add(guest.unicorn.get(), &diag_write_hook, UC_HOOK_MEM_WRITE,
                         reinterpret_cast<void*>(on_diag_write_window), &state,
                         options.diag_write_window_lo, options.diag_write_window_hi) != UC_ERR_OK) {
-            return std::unexpected(SyscallRunFailure{SyscallRunError::kUnicornFailure});
+            return std::unexpected(SyscallRunFailure{SyscallRunError::kUnicornFailure, {}, {}, {}});
         }
     }
 
@@ -566,28 +612,28 @@ std::expected<void, SyscallRunFailure> register_run_hooks(PreparedGuest& guest,
     if (uc_hook_add(guest.unicorn.get(), &syscall_hook, UC_HOOK_INSN,
                     reinterpret_cast<void*>(on_syscall_callback), &state, 1, 0,
                     UC_X86_INS_SYSCALL) != UC_ERR_OK) {
-        return std::unexpected(SyscallRunFailure{SyscallRunError::kUnicornFailure});
+        return std::unexpected(SyscallRunFailure{SyscallRunError::kUnicornFailure, {}, {}, {}});
     }
 
     uc_hook cpuid_hook = 0;
     if (uc_hook_add(guest.unicorn.get(), &cpuid_hook, UC_HOOK_INSN,
                     reinterpret_cast<void*>(on_cpuid_callback), &state, 1, 0,
                     UC_X86_INS_CPUID) != UC_ERR_OK) {
-        return std::unexpected(SyscallRunFailure{SyscallRunError::kUnicornFailure});
+        return std::unexpected(SyscallRunFailure{SyscallRunError::kUnicornFailure, {}, {}, {}});
     }
 
     uc_hook rdtsc_hook = 0;
     if (uc_hook_add(guest.unicorn.get(), &rdtsc_hook, UC_HOOK_INSN,
                     reinterpret_cast<void*>(on_rdtsc_callback), &state, 1, 0,
                     UC_X86_INS_RDTSC) != UC_ERR_OK) {
-        return std::unexpected(SyscallRunFailure{SyscallRunError::kUnicornFailure});
+        return std::unexpected(SyscallRunFailure{SyscallRunError::kUnicornFailure, {}, {}, {}});
     }
 
     uc_hook rdtscp_hook = 0;
     if (uc_hook_add(guest.unicorn.get(), &rdtscp_hook, UC_HOOK_INSN,
                     reinterpret_cast<void*>(on_rdtscp_callback), &state, 1, 0,
                     UC_X86_INS_RDTSCP) != UC_ERR_OK) {
-        return std::unexpected(SyscallRunFailure{SyscallRunError::kUnicornFailure});
+        return std::unexpected(SyscallRunFailure{SyscallRunError::kUnicornFailure, {}, {}, {}});
     }
 
     // Behavior monitored windows: memory windows from
@@ -610,7 +656,8 @@ std::expected<void, SyscallRunFailure> register_run_hooks(PreparedGuest& guest,
             if (uc_hook_add(guest.unicorn.get(), &read_window, UC_HOOK_MEM_READ,
                             reinterpret_cast<void*>(on_behavior_mem_read), &state, page,
                             page + kLedgerPageSize) != UC_ERR_OK) {
-                return std::unexpected(SyscallRunFailure{SyscallRunError::kUnicornFailure});
+                return std::unexpected(
+                    SyscallRunFailure{SyscallRunError::kUnicornFailure, {}, {}, {}});
             }
         }
         if (sample_image_size != 0) {
@@ -619,7 +666,8 @@ std::expected<void, SyscallRunFailure> register_run_hooks(PreparedGuest& guest,
                             reinterpret_cast<void*>(on_behavior_code), &state,
                             guest.metadata.image_base,
                             guest.metadata.image_base + sample_image_size) != UC_ERR_OK) {
-                return std::unexpected(SyscallRunFailure{SyscallRunError::kUnicornFailure});
+                return std::unexpected(
+                    SyscallRunFailure{SyscallRunError::kUnicornFailure, {}, {}, {}});
             }
         }
     }
@@ -627,25 +675,25 @@ std::expected<void, SyscallRunFailure> register_run_hooks(PreparedGuest& guest,
     uc_hook block_hook = 0;
     if (uc_hook_add(guest.unicorn.get(), &block_hook, UC_HOOK_BLOCK,
                     reinterpret_cast<void*>(on_syscall_run_block), &state, 1, 0) != UC_ERR_OK) {
-        return std::unexpected(SyscallRunFailure{SyscallRunError::kUnicornFailure});
+        return std::unexpected(SyscallRunFailure{SyscallRunError::kUnicornFailure, {}, {}, {}});
     }
 
     uc_hook intr_hook = 0;
     if (uc_hook_add(guest.unicorn.get(), &intr_hook, UC_HOOK_INTR,
                     reinterpret_cast<void*>(on_intr_callback), &state, 1, 0) != UC_ERR_OK) {
-        return std::unexpected(SyscallRunFailure{SyscallRunError::kUnicornFailure});
+        return std::unexpected(SyscallRunFailure{SyscallRunError::kUnicornFailure, {}, {}, {}});
     }
 
     uc_hook mem_invalid_hook = 0;
     if (uc_hook_add(guest.unicorn.get(), &mem_invalid_hook, UC_HOOK_MEM_INVALID,
                     reinterpret_cast<void*>(on_mem_invalid_callback), &state, 1, 0) != UC_ERR_OK) {
-        return std::unexpected(SyscallRunFailure{SyscallRunError::kUnicornFailure});
+        return std::unexpected(SyscallRunFailure{SyscallRunError::kUnicornFailure, {}, {}, {}});
     }
 
     uc_hook insn_invalid_hook = 0;
     if (uc_hook_add(guest.unicorn.get(), &insn_invalid_hook, UC_HOOK_INSN_INVALID,
                     reinterpret_cast<void*>(on_insn_invalid_callback), &state, 1, 0) != UC_ERR_OK) {
-        return std::unexpected(SyscallRunFailure{SyscallRunError::kUnicornFailure});
+        return std::unexpected(SyscallRunFailure{SyscallRunError::kUnicornFailure, {}, {}, {}});
     }
 
     // Loader-route API interception: one range-bound code hook per
@@ -655,7 +703,7 @@ std::expected<void, SyscallRunFailure> register_run_hooks(PreparedGuest& guest,
         if (uc_hook_add(guest.unicorn.get(), &api_hook, UC_HOOK_CODE,
                         reinterpret_cast<void*>(on_intercept), &state, state.intercept_vas[i],
                         state.intercept_vas[i] + 1) != UC_ERR_OK) {
-            return std::unexpected(SyscallRunFailure{SyscallRunError::kUnicornFailure});
+            return std::unexpected(SyscallRunFailure{SyscallRunError::kUnicornFailure, {}, {}, {}});
         }
     }
 
@@ -677,7 +725,8 @@ std::expected<void, SyscallRunFailure> register_run_hooks(PreparedGuest& guest,
                                 reinterpret_cast<void*>(on_rtl_unwind_ex), &state,
                                 state.rtl_unwind_address,
                                 state.rtl_unwind_address + 1) != UC_ERR_OK) {
-                    return std::unexpected(SyscallRunFailure{SyscallRunError::kUnicornFailure});
+                    return std::unexpected(
+                        SyscallRunFailure{SyscallRunError::kUnicornFailure, {}, {}, {}});
                 }
             }
         }
@@ -700,6 +749,14 @@ finish_run(SyscallRunState& state, PreparedGuest& guest, const SyscallRunOptions
 std::expected<SyscallRunStats, SyscallRunFailure>
 run_syscalls(PreparedGuest& guest, const SyscallRunOptions& options, const FactChannel& facts)
 {
+    // The module source table is a construction fact: deliver it before any
+    // state assembly or hook registration can fail the run - a run that
+    // never executes still carries its provenance.
+    if (options.module_source_sink) {
+        for (const auto& [name, source] : guest.module_sources) {
+            options.module_source_sink(name, system_module_source_spelling(source));
+        }
+    }
     SyscallRunState state;
     if (const auto assembled = assemble_run_state(guest, options, facts, state); !assembled) {
         return std::unexpected(assembled.error());
@@ -725,7 +782,7 @@ run_syscalls(PreparedGuest& guest, const SyscallRunOptions& options, const FactC
     if (uc_hook_add(guest.unicorn.get(), &mem_write_hook, UC_HOOK_MEM_WRITE_PROT,
                     reinterpret_cast<void*>(on_mem_write_prot_callback), &state, 1,
                     0) != UC_ERR_OK) {
-        return std::unexpected(SyscallRunFailure{SyscallRunError::kUnicornFailure});
+        return std::unexpected(SyscallRunFailure{SyscallRunError::kUnicornFailure, {}, {}, {}});
     }
     state.write_ledger = &write_ledger;
 
@@ -878,7 +935,8 @@ run_syscalls(PreparedGuest& guest, const SyscallRunOptions& options, const FactC
                     state.unhandled = true;
                     break;
                 case DispatchOutcome::kEngineError:
-                    return std::unexpected(SyscallRunFailure{SyscallRunError::kEmulationFailure});
+                    return std::unexpected(
+                        SyscallRunFailure{SyscallRunError::kEmulationFailure, {}, {}, {}});
                 }
                 break;
             }
@@ -915,7 +973,8 @@ run_syscalls(PreparedGuest& guest, const SyscallRunOptions& options, const FactC
                     state.unhandled = true;
                     break;
                 case seh::Step::EngineError:
-                    return std::unexpected(SyscallRunFailure{SyscallRunError::kEmulationFailure});
+                    return std::unexpected(
+                        SyscallRunFailure{SyscallRunError::kEmulationFailure, {}, {}, {}});
                 }
                 break;
             }
@@ -927,7 +986,8 @@ run_syscalls(PreparedGuest& guest, const SyscallRunOptions& options, const FactC
                 state.unhandled = true;
                 break;
             case DispatchOutcome::kEngineError:
-                return std::unexpected(SyscallRunFailure{SyscallRunError::kEmulationFailure});
+                return std::unexpected(
+                    SyscallRunFailure{SyscallRunError::kEmulationFailure, {}, {}, {}});
             }
             break;
         }
@@ -955,7 +1015,8 @@ run_syscalls(PreparedGuest& guest, const SyscallRunOptions& options, const FactC
                 state.unhandled = true;
                 break;
             case seh::Step::EngineError:
-                return std::unexpected(SyscallRunFailure{SyscallRunError::kEmulationFailure});
+                return std::unexpected(
+                    SyscallRunFailure{SyscallRunError::kEmulationFailure, {}, {}, {}});
             }
             break;
         }
@@ -986,7 +1047,8 @@ run_syscalls(PreparedGuest& guest, const SyscallRunOptions& options, const FactC
                 state.unhandled = true;
                 break;
             case seh::Step::EngineError:
-                return std::unexpected(SyscallRunFailure{SyscallRunError::kEmulationFailure});
+                return std::unexpected(
+                    SyscallRunFailure{SyscallRunError::kEmulationFailure, {}, {}, {}});
             }
             break;
         }
@@ -1077,10 +1139,12 @@ run_syscalls(PreparedGuest& guest, const SyscallRunOptions& options, const FactC
                 }
                 if (cur.context == nullptr &&
                     uc_context_alloc(guest.unicorn.get(), &cur.context) != UC_ERR_OK) {
-                    return std::unexpected(SyscallRunFailure{SyscallRunError::kUnicornFailure});
+                    return std::unexpected(
+                        SyscallRunFailure{SyscallRunError::kUnicornFailure, {}, {}, {}});
                 }
                 if (uc_context_save(guest.unicorn.get(), cur.context) != UC_ERR_OK) {
-                    return std::unexpected(SyscallRunFailure{SyscallRunError::kUnicornFailure});
+                    return std::unexpected(
+                        SyscallRunFailure{SyscallRunError::kUnicornFailure, {}, {}, {}});
                 }
                 // pick the next non-finished thread (round-robin, may be us)
                 std::size_t next = sched.current;
@@ -1204,10 +1268,23 @@ finish_run(SyscallRunState& state, PreparedGuest& guest, const SyscallRunOptions
     if (dump_eligible && !options.dump_directory.empty()) {
         if (!sheller::engine::write_dump(options.dump_directory, *state.write_ledger,
                                          guest.unicorn.get())) {
-            return std::unexpected(SyscallRunFailure{SyscallRunError::kIoFailure, 0, stats});
+            return std::unexpected(SyscallRunFailure{SyscallRunError::kIoFailure, 0, stats, {}});
         }
     }
 
+    // The boundary-trap stop: a deliberate, named termination - never a
+    // crash, never a budget expiry, never a completed call.
+    if (state.boundary_trap.fired) {
+        stats.terminated = false;
+        auto detail = std::format("boundary-trap: {}!{} (ordinal {}) at 0x{:x} called from 0x{:x}",
+                                  state.boundary_trap.module, state.boundary_trap.name,
+                                  state.boundary_trap.ordinal, state.boundary_trap.va,
+                                  state.boundary_trap.caller);
+        sheller::log::write(sheller::log::level::kWarning, "sheller run: " + detail);
+        SyscallRunFailure failure{SyscallRunError::kBoundaryTrap, 0, stats, {}};
+        failure.detail = std::move(detail);
+        return std::unexpected(failure);
+    }
     // unicorn2 stops silently (UC_ERR_OK) when the count or the timeout
     // expires; only real emulation faults come back as errors here.
     if (state.unhandled) {
@@ -1261,11 +1338,12 @@ finish_run(SyscallRunState& state, PreparedGuest& guest, const SyscallRunOptions
                 rip, rsp, rax, rcx, rdx, rdi, ntdll_base, perm_probe, hex);
             sheller::log::write(sheller::log::level::kWarning, crash);
         }
-        return std::unexpected(SyscallRunFailure{SyscallRunError::kUnhandledException, 0, stats});
+        return std::unexpected(
+            SyscallRunFailure{SyscallRunError::kUnhandledException, 0, stats, {}});
     }
     if (run_error != UC_ERR_OK) {
-        return std::unexpected(SyscallRunFailure{SyscallRunError::kEmulationFailure,
-                                                 static_cast<std::uint32_t>(run_error), stats});
+        return std::unexpected(SyscallRunFailure{
+            SyscallRunError::kEmulationFailure, static_cast<std::uint32_t>(run_error), stats, {}});
     }
     if (state.xfer_stop_reached) {
         return stats; // deliberate stop: success, guest did not terminate
@@ -1278,7 +1356,7 @@ finish_run(SyscallRunState& state, PreparedGuest& guest, const SyscallRunOptions
         // reading that gated the dump decision above.
         const auto expiry =
             timeout_stop ? SyscallRunError::kTimeout : SyscallRunError::kBudgetExhausted;
-        return std::unexpected(SyscallRunFailure{expiry, 0, stats});
+        return std::unexpected(SyscallRunFailure{expiry, 0, stats, {}});
     }
     return stats;
 }

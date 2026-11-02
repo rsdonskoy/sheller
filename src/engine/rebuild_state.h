@@ -7,9 +7,11 @@
 #ifndef SHELLER_ENGINE_REBUILD_STATE_H
 #define SHELLER_ENGINE_REBUILD_STATE_H
 
+#include "../loader/boundary_derive.h"
 #include "../loader/imports.h"
 #include "../syscalls/syscall_policy.h"
 #include "behavior_fact.h"
+#include "boundary_metadata.h"
 #include "exception_layout.h"
 #include "mem_region_map.h"
 #include "native_gate.h"
@@ -31,6 +33,7 @@
 #include <optional>
 #include <span>
 #include <string>
+#include <tuple>
 #include <utility>
 #include <vector>
 
@@ -197,6 +200,10 @@ struct LoadedSnapshot {
     // Present exactly when the container is v2 (DLL-input route); a v2
     // container without a complete pending block fails to load.
     std::optional<snapshot::PendingModule> pending{};
+    // The bilateral directory-mode inspection's verdict (design D6):
+    // nullopt when both sides are absent (the legacy route), the decoded
+    // record when the container carries the mode.
+    std::optional<boundary_metadata::MetadataInput> replay_metadata{};
 };
 
 inline RebuildFailure failure(const RebuildError error, const std::uint32_t unicorn_code = 0)
@@ -226,6 +233,37 @@ struct LoaderExportEntry {
     std::uint64_t function_va{};
     std::string name;
 };
+
+// Where a resident system module's bytes came from - the module source
+// table's values (change real-dll-module-dir). The synthetic and host
+// routes mark every row with the existing classes; directory mode adds the
+// strict tiers and the explicit fallback mark.
+enum class SystemModuleSource {
+    kSynthetic,          // the existing synthetic-route modules
+    kHostSystem,         // the existing Windows-host System32 fallback route
+    kDirectoryRealBytes, // directory mode: the directory DLL's own bytes
+    kDirectoryDerived,   // directory mode: boundary-pair derived stub image
+    kFallbackSynthetic,  // directory mode + fallback: synthetic module, marked
+};
+
+// The report-facing spelling of a source class (the module source sink
+// carries strings so the public option header stays free of engine enums).
+inline constexpr std::string_view system_module_source_spelling(SystemModuleSource source)
+{
+    switch (source) {
+    case SystemModuleSource::kSynthetic:
+        return "synthetic";
+    case SystemModuleSource::kHostSystem:
+        return "host-system";
+    case SystemModuleSource::kDirectoryRealBytes:
+        return "directory-real-bytes";
+    case SystemModuleSource::kDirectoryDerived:
+        return "directory-derived";
+    case SystemModuleSource::kFallbackSynthetic:
+        return "fallback-synthetic";
+    }
+    return "unknown";
+}
 
 struct PreparedGuest {
     UnicornEngine unicorn{nullptr};
@@ -261,6 +299,33 @@ struct PreparedGuest {
     // resolution follows export forwarders, which needs the export
     // directories' bytes, not just the name index.
     std::vector<loader::LoadedModule> loaded_modules{};
+    // Directory-mode world facts (change real-dll-module-dir): empty map and
+    // sources in the synthetic/host routes - behavior stays byte-identical.
+    bool directory_mode{false};
+    // folded module name -> source class, the construction's module source
+    // table (report face + metadata persistence)
+    std::vector<std::pair<std::string, SystemModuleSource>> module_sources{};
+    // folded boundary module name -> its applicability-checked manifest
+    // rules (the derived boundary modules only)
+    std::map<std::string, std::vector<loader::BoundaryRule>> boundary_rules{};
+    // the directory's API Set map, loaded against the raw ntdll's anchor;
+    // the explicit resolution context points at it
+    loader::ApiSetMapView api_set_map{};
+    // the decoded replay-side metadata record (design D6): present exactly
+    // when the container carries the bilateral directory-mode marks
+    std::optional<boundary_metadata::MetadataInput> directory_metadata{};
+    // Directory-mode counting whitelist and trap stop points (change
+    // real-dll-module-dir): the whitelist is the explicit (module base, VA,
+    // name) set whose stub entries count - derived compat stubs plus the
+    // fallback synthetic modules' exports; the trap VAs are the (c)-class
+    // unsupported exports whose entry terminates the run. Empty in the
+    // synthetic/host routes.
+    std::vector<LoaderExportEntry> stub_whitelist{};
+    std::vector<std::uint64_t> boundary_trap_vas{};
+    // trap VA -> (folded module name, export spelling, ordinal) for the
+    // named boundary-trap diagnosis
+    std::map<std::uint64_t, std::tuple<std::string, std::string, std::uint32_t>>
+        boundary_trap_names{};
 };
 
 // Section objects: the engine plays the object
@@ -579,6 +644,25 @@ struct SyscallRunState {
     // Fidelity dispatch mode + engine-side SEH dispatch state.
     bool fidelity_dispatch{};
     seh::SehDispatchState seh;
+    // Directory-mode boundary runtime (change real-dll-module-dir): the
+    // trap stop points (exact-entry hooks), the fired stop's diagnosis, and
+    // the explicit API Set resolution context (directory map; empty in the
+    // synthetic routes — the runtime DLL binding and the dynamic queries
+    // resolve through it instead of the prefix rules).
+    std::vector<std::uint64_t> boundary_trap_vas{};
+    std::map<std::uint64_t, std::tuple<std::string, std::string, std::uint32_t>>
+        boundary_trap_names{};
+    loader::ApiSetContext api_set_ctx{};
+    bool directory_mode{false};
+    struct BoundaryTrapDiagnosis {
+        bool fired{};
+        std::uint64_t va{};
+        std::uint64_t caller{};
+        std::string module;
+        std::string name;
+        std::uint32_t ordinal{};
+    };
+    BoundaryTrapDiagnosis boundary_trap;
     // The C++ accept handoff arms the exception replay through the real
     // guest dispatcher at ntdll!RtlUnwindEx (intercept.cpp); the export
     // address is resolved once per run for the by-address hook.

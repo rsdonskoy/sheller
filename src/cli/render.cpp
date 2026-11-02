@@ -904,6 +904,24 @@ std::string render_events_section(const AnalysisArtifacts& artifacts, const Even
     }
     out.push_back('}');
 
+    // Module source table (change real-dll-module-dir): key always present,
+    // [] on routes that never build a loader world. One row per resident
+    // system module - name plus the provenance class the loader marked.
+    out += ",\"module_sources\":[";
+    first = true;
+    for (const auto& row : artifacts.module_sources) {
+        if (!first) {
+            out.push_back(',');
+        }
+        first = false;
+        out += "{\"module\":";
+        append_json_string(out, row.module);
+        out += ",\"source\":";
+        append_json_string(out, row.source);
+        out.push_back('}');
+    }
+    out.push_back(']');
+
     // Loss: key always present. No ledger (default level) means the window
     // was never built - null says "not observable", which 0 cannot. A built
     // ledger spells its counters, zero included.

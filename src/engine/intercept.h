@@ -70,6 +70,10 @@ enum class InterceptId : std::uint32_t {
     kRegOpenKeyEx,
     kRegQueryValueEx,
     kRegCloseKey,
+    // Directory mode's real bodies (kernelbase's string family and the
+    // CRT-in-ntdll spellings) call ntdll!strlen; the derived image's trap
+    // body never runs - this handler answers the length from guest memory.
+    kStrlen,
 };
 
 // intercept-set membership by resolved final function name

@@ -38,8 +38,10 @@ sheller unpack packed.exe --stop esp+xfer \
 
 `report.json` is the event artifact: one `events` object whose `detail` is a single
 whole-run-ordered list of raw events and judgment events (module walks, clock probes,
-SMC crossings, ...), plus exact whole-run `counts`, the `stub_calls` side table and
-`loss`. The default level lists the semantic types, sample-code page reads/writes
+SMC crossings, ...), plus exact whole-run `counts`, the `stub_calls` side table, the
+`module_sources` provenance table (one row per resident system module - where its
+bytes came from; `[]` outside loader worlds) and `loss`. The default level lists the
+semantic types, sample-code page reads/writes
 into system DLLs and low-frequency judgments; `--event-level full` adds the
 window-side types (`block-exec`, `sample-code`, `smc-execute`) from the bounded
 ledger window and turns `loss` into counters. The same input replays to a
@@ -106,6 +108,35 @@ The sample route needs the generated `synth_modules` directory next to the CLI
 (the build produces it; the CLI locates it automatically). PE32 sample input is
 refused on these hosts with a named capture-class failure instead of entering
 the 32-bit path.
+
+### Directory-mode system modules
+
+`run` and `unpack` accept `--system-modules <dir>`: the resident system world
+is then built strictly from the user-supplied directory - real DLL bytes for
+every module except the boundary pair (`ntdll.dll`, `win32u.dll`), which is
+*derived*: export names, ordinals, aliases and forwarders survive, the entry
+addresses rebuild, and syscall service stubs keep their numbers (validated
+against the stub bytes, never the `Nt`/`Zw` prefix). The host's system
+directories are never read. You supply the DLLs; their license is your
+responsibility.
+
+Strictness is the contract: a closure member the directory lacks is a named
+construction rejection, and `--system-modules-fallback` opts into pulling such
+members from the synthetic directory (marked in the module source table).
+Classification follows a versioned boundary manifest
+(`tools/boundary_manifest/*.json`, hash-bound to the covered builds); an
+export outside the manifest is rejected by name, an unsupported function
+becomes a `boundary-trap` stop (a named diagnosis in the report, never a fake
+success), manifest-declared compat stubs answer per-function and are counted,
+and API Set resolution uses the directory's own `apiset-map.bin` (no
+`api-ms-*` prefix guessing). Resident real modules bind their own IATs at
+construction; no resident module runs DllMain, TLS callbacks or any entry
+initialization - the supported surface is the verified no-init-dependency
+call paths, and unrepaired paths may crash or misbehave (that is a
+compatibility limit, not a bug). A directory-mode container carries a
+versioned metadata record plus an independent mode marker, so replay restores
+the full run tables without the original directory; containers without the
+marks keep the synthetic route byte-for-byte.
 
 Inside the emulator the guest is treated as a real Windows process: syscalls answer
 from a data-driven policy table with ntdll numbers resolved from the guest's own

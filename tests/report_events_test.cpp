@@ -367,12 +367,12 @@ TEST(EventsDetail, NoCountCapOnTheDetailList)
     EXPECT_EQ(json.find("\"omitted\""), std::string::npos);
 }
 
-TEST(EventsDetail, EmptyArtifactsRenderFourKeys)
+TEST(EventsDetail, EmptyArtifactsRenderFiveKeys)
 {
     const sheller::AnalysisArtifacts artifacts;
     EXPECT_EQ(sheller::cli::render_events_section(artifacts),
               "{\"counts\":{},\"detail\":[],\"stub_calls\":{},"
-              "\"loss\":{\"dropped\":null,\"truncated\":null}}");
+              "\"module_sources\":[],\"loss\":{\"dropped\":null,\"truncated\":null}}");
 }
 
 TEST(EventsDetail, CountsLevelEmitsNoDetailEntries)
@@ -387,7 +387,7 @@ TEST(EventsDetail, CountsLevelEmitsNoDetailEntries)
         sheller::cli::render_events_section(artifacts, sheller::cli::EventLevel::Counts);
     EXPECT_EQ(json, "{\"counts\":{\"block-exec\":3,\"xfer\":1,\"syscall\":1,\"rdtsc\":1},"
                     "\"detail\":[],\"stub_calls\":{\"kernel32!malloc\":1},"
-                    "\"loss\":{\"dropped\":null,\"truncated\":null}}");
+                    "\"module_sources\":[],\"loss\":{\"dropped\":null,\"truncated\":null}}");
 }
 
 TEST(EventsStub, SideTableSnapshotResolvedNamesBeforeLoss)
@@ -402,11 +402,12 @@ TEST(EventsStub, SideTableSnapshotResolvedNamesBeforeLoss)
     // side table sits before the always-present loss key.
     EXPECT_NE(json.find(",\"stub_calls\":{\"sample.exe!ExitProcess\":1,"
                         "\"ucrtbase!malloc\":2,\"ucrtbase!memcpy\":1},"
-                        "\"loss\":{\"dropped\":null,\"truncated\":null}}"),
+                        "\"module_sources\":[],\"loss\":{\"dropped\":null,\"truncated\":null}}"),
               std::string::npos)
         << json;
-    EXPECT_TRUE(json.ends_with("\"ucrtbase!memcpy\":1},"
-                               "\"loss\":{\"dropped\":null,\"truncated\":null}}"))
+    EXPECT_TRUE(
+        json.ends_with("\"ucrtbase!memcpy\":1},"
+                       "\"module_sources\":[],\"loss\":{\"dropped\":null,\"truncated\":null}}"))
         << json;
 }
 
@@ -445,7 +446,7 @@ TEST(BehaviorReportRender, JudgmentApiNamesAreJsonEscaped)
         "{\"counts\":{},\"detail\":[\n{\"type\":\"export-walk\",\"seq\":1,"
         "\"pc\":\"0x140001000\",\"address\":\"0x600001100\",\"aux\":\"0x0\",\"subtype\":\"\","
         "\"api\":\"ba\\\"d\\\\x\"}\n],\"stub_calls\":{},"
-        "\"loss\":{\"dropped\":null,\"truncated\":null}}";
+        "\"module_sources\":[],\"loss\":{\"dropped\":null,\"truncated\":null}}";
     EXPECT_EQ(json, expected);
 }
 
@@ -480,7 +481,7 @@ TEST(EventsRender, ByteExactShapeAcrossAllClasses)
         "{\"type\":\"apicall\",\"seq\":4,\"api\":\"kernel32!LoadLibraryA\","
         "\"retval\":\"0x7ff800000000\",\"caller\":\"0x1400012f4\"}\n],"
         "\"stub_calls\":{\"kernel32!malloc\":1},"
-        "\"loss\":{\"dropped\":null,\"truncated\":null}}";
+        "\"module_sources\":[],\"loss\":{\"dropped\":null,\"truncated\":null}}";
     EXPECT_EQ(json, expected);
     EXPECT_EQ(json, sheller::cli::render_events_section(artifacts)); // byte-identical
 }
@@ -623,7 +624,7 @@ TEST(EventsDetailFullLevel, UnifiedStreamIsByteExactInWireOrder)
         "{\"type\":\"block-exec\",\"seq\":5,\"tid\":7,\"pc\":\"0x140003000\","
         "\"addr\":\"0x140003000\"}\n],"
         "\"stub_calls\":{},"
-        "\"loss\":{\"dropped\":0,\"truncated\":0}}";
+        "\"module_sources\":[],\"loss\":{\"dropped\":0,\"truncated\":0}}";
     EXPECT_EQ(json, expected);
     EXPECT_EQ(json, render_full(artifacts));
 }
@@ -662,12 +663,15 @@ TEST(EventsDetailFullLevel, LossNullAtSemanticAndCountersAtFull)
 
     const auto semantic = sheller::cli::render_events_section(artifacts);
     // No ledger at semantic level: null says "not observable", 0 would lie.
-    EXPECT_NE(semantic.find("\"loss\":{\"dropped\":null,\"truncated\":null}"), std::string::npos)
+    EXPECT_NE(semantic.find("\"module_sources\":[],\"loss\":{\"dropped\":null,\"truncated\":null}"),
+              std::string::npos)
         << semantic;
 
     // Zero still renders both fields - the presence is the contract.
     const auto clean = render_full(artifacts);
-    EXPECT_NE(clean.find("\"loss\":{\"dropped\":0,\"truncated\":0}"), std::string::npos) << clean;
+    EXPECT_NE(clean.find("\"module_sources\":[],\"loss\":{\"dropped\":0,\"truncated\":0}"),
+              std::string::npos)
+        << clean;
 
     artifacts.timeline_dropped = 7;
     artifacts.timeline_truncated = 2;

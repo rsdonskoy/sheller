@@ -97,6 +97,12 @@ for reading these files: the six product names (`analyze` x2, `unpack_sample`,
 | `loader_pe_e2e_test` | `loader_pe_e2e` | loader-run e2e: TLS order, direct syscall, terminate, budget exhaustion, cross-run determinism (non-Windows hosts construct the container and need the generated synthetic modules) |
 | `capture_cli_test` | `capture_cli` | `sheller capture` CLI behavior (positive path Windows) |
 | `synth_modules_test` | `synth_modules` | synthetic system modules generated from frozen manifests; engine synthetic-mode run over the packed corpus through the constructed container |
+| `boundary_derive_test` | `boundary_derive` | directory-mode boundary derivation: syscall numbers validated in the source body (never by name prefix), names/ordinals/aliases/forwarders preserved, EAT rebuilt, weld-slot + e_res2 marker layout, double-derive determinism, named rejections; derived images walked by the loader-side index/forwarder resolver |
+| `boundary_seed_test` | `boundary_seed` | boundary-manifest codegen: deterministic, committed seed freshness enforced, the pinned fixture binding compiles |
+| `boundary_manifest_test` | `boundary_manifest` | manifest applicability verdicts are named rejections; seed rows drive the derive end-to-end; forwarded exports classify along the chain |
+| `boundary_metadata_test` | `boundary_metadata` | metadata codec: deterministic encode, named over-limit rejection, damage-by-name decode rejections, the e_res2 marker round trip |
+| `apiset_map_test` | `apiset_map` | API Set map generator determinism; bounded reader named rejections (magic/version/arch/anchor/range/conflict); the explicit context resolves directory maps with no prefix fallback, synthetic route unchanged |
+| `loader_directory_test` | `loader_directory` | the directory-mode route end to end: strict source tiers, required anchored API Set map, named closure rejections (host system directories never read), marked synthetic fallback, resident real-module IAT binding before any map bytes exist, trap stop with the named diagnosis, whitelist-driven stub counting (compat counted once per alias pair, real bodies never), metadata region + e_res2 marker, bilateral replay-side checks (one-sided or damaged containers rejected by name), packed-DLL directory construction determinism + replay, and the env-gated real-DLL corpus test (`SHELLER_REALDLL_DIR` carrying real ntdll/kernel32/kernelbase + the anchored apiset-map; skip when unset, never in CI) |
 | `snapshot_craft_test` | `snapshot_craft` | the `snapshot-craft` capability: a v1 container constructed from a prepared guest and replayed through the snapshot route - self-sufficient execution up to the OEP transfer with API answers, base-ordered/writable record fidelity (each condition separately breakable back to the 2-block failure), attribution to `module!section`, byte-identical double construction plus replay, the exact-base synthetic-world predicate (congruent-but-unequal bases do not trigger), reattach table equality against the construction (intercepts as the documented superset), LdrLoadDll handle == the container's LDR entry VA and `STATUS_DLL_NOT_FOUND` on a resident miss, and the machine-derived container size bound with an in-test reverse injection |
 | `linux_packed_e2e_test` | - (`EXCLUDE_FROM_ALL`) | opt-in: a Windows-captured packed snapshot replayed and repaired on the Linux engine (needs `tests/packed_lin.snap` transferred) |
 | `analysis_facade_local_corpus` | - (`EXCLUDE_FROM_ALL`) | opt-in local-corpus equivalence for the facade: instoll pins the default stream (6 records: 5 syscall with 3 rejects + 1 rdtsc; rdtsc at wire_seq 87324; all 16 `mem-write` instances are counts-only because none is a sample-code write into a system module) and the window-side counts (57077 block-exec, 180211 sample-code, full window with eviction), packed.exe (Windows capture) pins the judgment face (exactly one `oep-candidate` event and the single `packed.exe UPX1 -> UPX0` xfer). Instoll snapshot is local corpus; default path is the analyzed run30 capture, `SHELLER_INSTOLL_SNAP` overrides. Build + run explicitly: `cmake --build --preset windows-release --target analysis_facade_local_corpus`. Both tests also arm an unreachable `xfer_number=2` and pin `xfers` against the emitted `kXfer` event count (instoll 0/0, packed.exe 1/1) - the counter skips burn-loop probe speculation while the emitter does not, so that agreement is the evidence that no probe crossed an attribution-identity boundary on these corpora |
@@ -631,9 +637,32 @@ change fixed - the replay is now cross-process byte-identical on the
 development machine - but the fixed trajectory itself has not been
 exercised on shared runner hardware, so the suite waits there.
 
-Stop-target note for this corpus: the UPX DllMain stub opens with
-argument-shadow stores and a reason branch before its register saves, so
-the esp scan finds no contiguous push sequence at the re-armed entry and
+### Real-DLL directory corpus (real-dll-module-dir, env-gated)
+
+`loader_directory_test` grows one opt-in test behind an environment variable -
+it drives real Windows DLLs you supply locally and never runs in CI:
+
+* `SHELLER_REALDLL_DIR` - a directory holding real x64 copies of
+  `ntdll.dll`, `kernel32.dll` and `kernelbase.dll` plus the API Set map for
+  the corpus ntdll (`apiset-map.bin`, generated from a reviewed text source
+  with `tools/gen_apiset_map.py` and anchored to the corpus ntdll's
+  whole-file xxhash64). That ntdll build must be registered in
+  `tools/boundary_manifest/ntdll.x64.real.json` (the real-build manifest; the
+  separate `ntdll.x64.json` binds the committed CI fixture, not your corpus).
+  An unregistered build skips with a naming message rather than guessing;
+  regenerate the seed (`tools/gen_boundary_seed.py`) when you register rows.
+
+`RealDllCorpusStringCallExecutesRealCode` generates a sample that imports
+`kernel32!lstrlenA` and `ntdll!NtTerminateProcess`, then proves the chain
+end to end: the real kernel32 thunk jumps into the real kernelbase body
+executing against guest memory, and the derived ntdll's stub terminates with
+the string length as the exit code (16 = `strlen("sheller-real-dll")`).
+The test skips when the variable is unset - nothing corpus-shaped lands in
+the repository.
+
+Stop-target note for the packed DLL corpus above: the UPX DllMain stub opens
+with argument-shadow stores and a reason branch before its register saves,
+so the esp scan finds no contiguous push sequence at the re-armed entry and
 `--stop esp` / `--stop esp+xfer` are a documented silent miss (the run
 closes normally, unpack completes). `--stop xfer=1` is the usable stop
 face - the stub's post-restore jump to the unpacked entry is the first

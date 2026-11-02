@@ -730,6 +730,78 @@ endif()
   add_dependencies(synth_modules_test synth_modules)
   add_test(NAME synth_modules COMMAND synth_modules_test)
 
+  # Boundary description seed (change real-dll-module-dir): the codegen over
+  # tools/boundary_manifest/*.json is deterministic, the committed
+  # src/engine/boundary_seed.inc stays fresh, and the committed table
+  # compiles standalone with the pinned fixture-image binding.
+  add_executable(boundary_seed_test boundary_seed_test.cpp)
+  target_include_directories(boundary_seed_test PRIVATE
+    "${CMAKE_CURRENT_SOURCE_DIR}/../src/engine")
+  target_compile_definitions(boundary_seed_test PRIVATE
+    BOUNDARY_GEN_SCRIPT="${CMAKE_CURRENT_SOURCE_DIR}/../tools/gen_boundary_seed.py"
+    BOUNDARY_MANIFEST_DIR="${CMAKE_CURRENT_SOURCE_DIR}/../tools/boundary_manifest"
+    BOUNDARY_SEED="${CMAKE_CURRENT_SOURCE_DIR}/../src/engine/boundary_seed.inc"
+    BOUNDARY_PYTHON="${Python3_EXECUTABLE}")
+  target_link_libraries(boundary_seed_test PRIVATE GTest::gtest_main)
+  sheller_apply_common(boundary_seed_test)
+  add_test(NAME boundary_seed COMMAND boundary_seed_test)
+
+  # Boundary manifest binding (change real-dll-module-dir): the committed
+  # seed's applicability verdicts are named rejections, the seed rows drive
+  # the derive end-to-end, and forwarded exports classify along the chain.
+  add_executable(boundary_manifest_test boundary_manifest_test.cpp)
+  target_include_directories(boundary_manifest_test PRIVATE
+    "${CMAKE_CURRENT_SOURCE_DIR}/../src/engine"
+    "${CMAKE_CURRENT_SOURCE_DIR}/../src/loader")
+  target_link_libraries(boundary_manifest_test PRIVATE GTest::gtest_main sheller_engine)
+  sheller_apply_common(boundary_manifest_test)
+  add_test(NAME boundary_manifest COMMAND boundary_manifest_test)
+
+  # Boundary metadata codec (change real-dll-module-dir): deterministic
+  # encode, the named over-limit rejection, damage-by-name decode
+  # rejections, and the DOS e_res2 marker round trip.
+  add_executable(boundary_metadata_test boundary_metadata_test.cpp)
+  target_include_directories(boundary_metadata_test PRIVATE
+    "${CMAKE_CURRENT_SOURCE_DIR}/../src/engine")
+  target_link_libraries(boundary_metadata_test PRIVATE GTest::gtest_main sheller_engine)
+  sheller_apply_common(boundary_metadata_test)
+  add_test(NAME boundary_metadata COMMAND boundary_metadata_test)
+
+  # API Set map (change real-dll-module-dir): generator determinism, the
+  # bounded reader's named rejections, and the explicit context resolving
+  # directory maps while the synthetic prefix route stays unchanged.
+  add_executable(apiset_map_test apiset_map_test.cpp)
+  target_include_directories(apiset_map_test PRIVATE
+    "${CMAKE_CURRENT_SOURCE_DIR}/../src/loader"
+    "${CMAKE_CURRENT_SOURCE_DIR}/../tests")
+  target_compile_definitions(apiset_map_test PRIVATE
+    APISET_GEN_SCRIPT="${CMAKE_CURRENT_SOURCE_DIR}/../tools/gen_apiset_map.py"
+    APISET_SOURCE_JSON="${CMAKE_CURRENT_SOURCE_DIR}/../tools/apisetmap/ntdll.x64.json"
+    APISET_PYTHON="${Python3_EXECUTABLE}")
+  target_link_libraries(apiset_map_test PRIVATE GTest::gtest_main sheller_engine)
+  sheller_apply_common(apiset_map_test)
+  add_test(NAME apiset_map COMMAND apiset_map_test)
+
+  # Directory-mode loader route (change real-dll-module-dir): the strict
+  # source tiers over a user directory - derived boundary pair, real-byte
+  # modules, required anchored API Set map, named closure rejections, the
+  # marked synthetic fallback, and the untouched synthetic route.
+  add_executable(loader_directory_test loader_directory_test.cpp)
+  target_include_directories(loader_directory_test PRIVATE
+    "${CMAKE_CURRENT_SOURCE_DIR}/../src/engine"
+    "${CMAKE_CURRENT_SOURCE_DIR}/../src/loader"
+    "${CMAKE_CURRENT_SOURCE_DIR}")
+  target_compile_definitions(loader_directory_test PRIVATE
+    SHELLER_SAMPLE_PACKED_PATH="${CMAKE_CURRENT_SOURCE_DIR}/packed.exe"
+    SHELLER_SAMPLE_PACKED_DLL_PATH="${CMAKE_SOURCE_DIR}/tests/packed.dll"
+    SYNTH_MODULE_DIR="${SYNTH_MODULE_DIR}"
+    APISET_GEN_SCRIPT="${CMAKE_CURRENT_SOURCE_DIR}/../tools/gen_apiset_map.py"
+    APISET_SOURCE_JSON="${CMAKE_CURRENT_SOURCE_DIR}/../tools/apisetmap/ntdll.x64.json"
+    APISET_PYTHON="${Python3_EXECUTABLE}")
+  target_link_libraries(loader_directory_test PRIVATE GTest::gtest_main sheller_engine sheller_api)
+  sheller_apply_common(loader_directory_test)
+  add_test(NAME loader_directory COMMAND loader_directory_test)
+
   # Crafted containers: construction from a prepared guest, record fidelity,
   # attribution, determinism, synthetic-world reattach and its exact-base
   # predicate, LdrLoadDll handles, and the machine-derived size bound.
@@ -1068,6 +1140,19 @@ target_link_libraries(loader_test PRIVATE GTest::gtest_main sheller_engine)
 sheller_apply_common(loader_test)
 
 add_test(NAME loader COMMAND loader_test)
+
+# Boundary derivation (change real-dll-module-dir): the pure byte-level
+# directory-file -> stub-image function - syscall numbers validated in the
+# source body, names/ordinals/aliases/forwarders preserved, EAT rebuilt,
+# weld-slot and marker-slot layout, double-derive determinism, named
+# rejections. Portable by design.
+add_executable(boundary_derive_test boundary_derive_test.cpp)
+target_include_directories(boundary_derive_test PRIVATE
+  "${CMAKE_CURRENT_SOURCE_DIR}/../src/loader")
+target_link_libraries(boundary_derive_test PRIVATE GTest::gtest_main sheller_engine)
+sheller_apply_common(boundary_derive_test)
+
+add_test(NAME boundary_derive COMMAND boundary_derive_test)
 
 add_executable(loader_pe_e2e_test loader_pe_e2e_test.cpp)
 target_compile_definitions(loader_pe_e2e_test PRIVATE

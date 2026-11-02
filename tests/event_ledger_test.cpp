@@ -513,6 +513,7 @@ TEST(EventLedgerStub, CountsRenderDeterministically)
     // the side table lands under the report's own stub_calls key.
     EXPECT_EQ(json, "{\"counts\":{},\"detail\":[],\"stub_calls\":{\"1!malloc\":2,\"1!memcpy\":1,"
                     "\"4!?_Src@?1??_Getffldx\":1},"
+                    "\"module_sources\":[],"
                     "\"loss\":{\"dropped\":null,\"truncated\":null}}");
     EXPECT_EQ(json, render_stub_calls_section(ledger));
 }
