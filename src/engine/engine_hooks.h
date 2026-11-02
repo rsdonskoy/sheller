@@ -18,6 +18,14 @@ bool on_mem_write_prot_callback(uc_engine* const uc, const uc_mem_type, const st
 // Block hook of the syscall run: bumps the block counter and, when an event
 // sink is attached, emits block-exec with the block start address (the hook
 // address is the block start). Hot path: no allocation, no IO.
+// Directory-mode boundary trap (change real-dll-module-dir): an
+// exact-entry code hook over each (c)-class trap VA. Fills the named
+// diagnosis, marks the deliberate stop and halts - the ud2 body and every
+// instruction after the call never execute, and the caller is answered by
+// nothing.
+void on_boundary_trap(uc_engine* uc, const std::uint64_t address, const std::uint32_t,
+                      void* user_data);
+
 void on_syscall_run_block(uc_engine* uc, const std::uint64_t address, const std::uint32_t,
                           void* const user_data);
 

@@ -1,0 +1,22 @@
+{
+  "schema": 1,
+  "module": "ntdll.dll",
+  "arch": "x64",
+  "images": [
+    {
+      "xxhash64": "0x6c806f42b18c5f46",
+      "note": "tests/boundary_fixture.h make_boundary_source(boundary_fixture_exports(false)) - the self-made mechanism-corpus image the CI directory-mode tests map; re-pin when the fixture changes"
+    }
+  ],
+  "exports": [
+    {"name": "NtCreateFile", "ordinal": 0, "kind": "syscallstub"},
+    {"name": "ZwCreateFile", "ordinal": 1, "kind": "syscallstub"},
+    {"name": "RtlFoo", "ordinal": 2, "kind": "compat", "ret": "0xC0000001"},
+    {"name": "RtlFooAlias", "ordinal": 2, "kind": "compat", "ret": "0xC0000001"},
+    {"name": "NtWeird", "ordinal": 3, "kind": "trap"},
+    {"name": "DataExport", "ordinal": 4, "kind": "data",
+     "layout": {"size": 8, "align": 8, "bytes": "1020304050607080"}},
+    {"ordinal": 5, "kind": "syscallstub"},
+    {"name": "NtTerminateProcess", "ordinal": 6, "kind": "syscallstub"}
+  ]
+}

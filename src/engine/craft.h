@@ -28,7 +28,9 @@ craft_container_from_guest(const PreparedGuest& guest);
 // sample route reports that failure as a capture-class error.
 std::expected<std::vector<std::uint8_t>, RebuildFailure>
 craft_sample_container(const std::filesystem::path& pe_path, bool fidelity_seams,
-                       const std::filesystem::path& synthetic_module_dir);
+                       const std::filesystem::path& synthetic_module_dir,
+                       const std::filesystem::path& system_modules_dir = {},
+                       bool system_modules_fallback = false);
 
 } // namespace sheller::engine
 

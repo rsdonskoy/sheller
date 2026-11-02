@@ -207,6 +207,18 @@ struct StubCall {
     std::uint64_t count{};
 };
 
+// One row of the module source table (change real-dll-module-dir): where a
+// resident system module's bytes came from. Empty on routes that never
+// build a loader world.
+struct AnalysisModuleSource {
+    std::string module{}; // folded name with extension
+    // "directory-derived" (boundary pair under the committed manifest),
+    // "directory-real-bytes" (the directory DLL's own bytes),
+    // "fallback-synthetic" (directory mode + fallback closure member),
+    // "synthetic" (the synthetic route), "host-system" (host System32).
+    std::string source{};
+};
+
 // Analysis artifacts: the same structure rides success and failure (a failed
 // run still carries what it produced). Counts are whole-run exact values -
 // they accumulate outside the timeline's ring, so a lossy (evicted) timeline
@@ -236,6 +248,10 @@ struct AnalysisArtifacts {
     std::array<std::uint64_t, kAnalysisEventTypeCount> event_counts{};
     // Stub-call side-table snapshot.
     std::vector<StubCall> stub_calls{};
+    // The module source table: one row per resident system module,
+    // delivered before the first instruction executes (present even on a
+    // run that later failed).
+    std::vector<AnalysisModuleSource> module_sources{};
     // Window tier (only with AnalysisOptions::timeline): the ledger's
     // retention window re-encoded as concatenated TLV events (the guest
     // contract wire format). Lossy: the ledger is a fixed-capacity ring, so
@@ -389,6 +405,13 @@ struct UnpackOptions {
     // Required for loader-route unpacks - the run maps them instead of the
     // host's real system DLLs; ignored on the Windows capture route.
     std::filesystem::path synthetic_module_dir;
+    // Directory-mode system modules (change real-dll-module-dir): the
+    // resident set comes strictly from this directory (boundary pair
+    // derived, everything else real bytes); the synthetic directory serves
+    // only the explicit fallback. On every host, directory-mode unpacks
+    // construct their world instead of capturing a native process.
+    std::filesystem::path system_modules_dir;
+    bool system_modules_fallback{false};
 };
 
 struct UnpackOutcome {

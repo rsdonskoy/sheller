@@ -410,7 +410,7 @@ TEST(SnapshotCraft, MissingSyntheticDirectoryFailsConstruction)
     std::ispanstream in{std::span<char>{
         reinterpret_cast<char*>(const_cast<std::uint8_t*>(crafted.data())), crafted.size()}};
     auto guest = engine::prepare_guest_stream(in);
-    ASSERT_TRUE(guest.has_value());
+    ASSERT_TRUE(guest.has_value()) << guest.error().detail;
     const auto attached = engine::reattach_synthetic_world(*guest, fs::path{});
     ASSERT_FALSE(attached.has_value());
     EXPECT_EQ(attached.error(), engine::SyscallRunError::kSyntheticModulesMissing);

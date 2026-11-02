@@ -1006,3 +1006,20 @@ TEST(RunCli, EspStopVetoesTheWallClockMidLeg)
 }
 
 } // namespace
+
+// Directory-mode CLI (change real-dll-module-dir, task 6.1): the options
+// ride run (the spec's mapping-input scenario asserts the success face in
+// the engine-level tests); a bad --system-modules path exits non-zero.
+TEST(CliRun, SystemModulesBadPathExitsNonZero)
+{
+    const std::string cli = SHELLER_CLI_FILE_NAME;
+    const std::string cmd = cli + " run " + SHELLER_SAMPLE_PACKED_PATH + " --system-modules " +
+                            SHELLER_SAMPLE_PACKED_PATH + " -b 0M";
+    std::array<char, 256> buffer{};
+    const auto pipe = _popen(cmd.c_str(), "r");
+    ASSERT_NE(pipe, nullptr);
+    while (fgets(buffer.data(), static_cast<int>(buffer.size()), pipe) != nullptr) {
+    }
+    const int status = _pclose(pipe);
+    EXPECT_NE(status, 0);
+}

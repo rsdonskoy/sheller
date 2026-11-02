@@ -61,8 +61,10 @@ SyscallRunError run_error_of(const RebuildError error)
 
 SyscallRunFailure run_failure_of(const RebuildFailure& failure)
 {
-    // Prepare-stage failures carry no run statistics.
-    return SyscallRunFailure{run_error_of(failure.error), failure.unicorn_code, {}};
+    // Prepare-stage failures carry no run statistics; the named rejection
+    // detail (the loader-route wording names the module and the reason)
+    // travels with the mapped error.
+    return SyscallRunFailure{run_error_of(failure.error), failure.unicorn_code, {}, failure.detail};
 }
 
 } // namespace
@@ -197,7 +199,8 @@ run_pe_file_with_facts(const std::filesystem::path& pe_path, const SyscallRunOpt
     // directly, so the default path stays zero-touch.
     auto guest = prepare_pe_file(pe_path, options.windows_fidelity_dispatch,
                                  options.synthetic_system_modules ? options.synthetic_module_dir
-                                                                  : std::filesystem::path{});
+                                                                  : std::filesystem::path{},
+                                 options.system_modules_dir, options.system_modules_fallback);
     if (!guest) {
         return std::unexpected(run_failure_of(guest.error()));
     }

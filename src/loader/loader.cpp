@@ -217,6 +217,42 @@ std::expected<void, LoadError> apply_relocations(std::span<std::uint8_t> image,
     return {};
 }
 
+std::expected<void, LoadError> validate_relocations(std::span<const std::uint8_t> image,
+                                                    const ImageInfo& info)
+{
+    if (info.reloc_directory_size == 0 || info.reloc_directory_rva == 0 ||
+        info.reloc_directory_rva >= image.size()) {
+        return {}; // no relocation directory: nothing to validate
+    }
+    auto offset = static_cast<std::size_t>(info.reloc_directory_rva);
+    const auto end = static_cast<std::size_t>(info.reloc_directory_rva + info.reloc_directory_size);
+    if (end > image.size()) {
+        return std::unexpected(LoadError::kBadReloc);
+    }
+    while (offset + 8 <= end) {
+        const auto page_rva = read32(image, offset);
+        const auto block_size = read32(image, offset + 4);
+        if (block_size < 8 || block_size > end - offset) {
+            return std::unexpected(LoadError::kBadReloc);
+        }
+        const auto entry_count = (block_size - 8) / 2;
+        for (std::size_t i = 0; i < entry_count; ++i) {
+            const auto entry = read16(image, offset + 8 + 2 * i);
+            const auto type = entry >> 12;
+            if (type != kRelocHighLow && type != kRelocDir64Value) {
+                continue; // padding or an unknown type: not a fixup claim
+            }
+            const auto target = static_cast<std::size_t>(page_rva + (entry & 0xFFF));
+            const auto width = type == kRelocHighLow ? 4 : 8;
+            if (target + width > image.size()) {
+                return std::unexpected(LoadError::kBadReloc);
+            }
+        }
+        offset += block_size;
+    }
+    return {};
+}
+
 std::expected<std::vector<std::uint64_t>, LoadError>
 tls_callbacks(std::span<const std::uint8_t> image, const ImageInfo& info,
               const std::uint64_t base_delta)

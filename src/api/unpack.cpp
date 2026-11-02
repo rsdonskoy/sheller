@@ -203,51 +203,57 @@ UnpackOutcome unpack_sample_impl(const std::filesystem::path& sample, const Unpa
     // pages from the same bytes.
     std::vector<std::uint8_t> snapshot;
     api::detail::Wiring wiring;
+    const bool directory_mode = !options.system_modules_dir.empty();
 #ifdef _WIN32
-    capture::Options capture_options;
-    capture_options.sample_path = sample;
-    capture_options.shellcode = options.shellcode;
-    const auto captured = capture::run_to_buffer(capture_options, snapshot);
-    if (captured.status != capture::Status::kOk) {
-        AnalysisArtifacts artifacts;
-        artifacts.instrumented = false;
-        return fail(AnalysisFailure::Kind::kCapture, captured.detail, std::move(artifacts));
-    }
-    wiring = api::detail::wire_behavior(snapshot);
-#else
-    if (options.synthetic_module_dir.empty()) {
-        AnalysisArtifacts artifacts;
-        artifacts.instrumented = false;
-        return fail(AnalysisFailure::Kind::kCapture,
-                    std::string{api::detail::kMissingSyntheticModules}, std::move(artifacts),
-                    std::nullopt, capture::Status::kCaptureFailed);
-    }
-    if (const auto magic = api::detail::peek_pe_magic(sample);
-        magic.has_value() && magic.value() == 0x10B) {
-        // A host-domain boundary, distinct from the missing-directory
-        // failure in wording and status.
-        AnalysisArtifacts artifacts;
-        artifacts.instrumented = false;
-        return fail(AnalysisFailure::Kind::kCapture,
-                    std::string{api::detail::kX86SampleUnsupported}, std::move(artifacts),
-                    std::nullopt, capture::Status::kNotX64Pe);
-    }
-    auto container = engine::craft_sample_container(sample, false, options.synthetic_module_dir);
-    if (!container) {
-        AnalysisArtifacts artifacts;
-        artifacts.instrumented = false;
-        return fail(AnalysisFailure::Kind::kCapture,
-                    "sample container construction failed: " +
-                        (container.error().detail.empty()
-                             ? std::string{engine::rebuild_error_message(container.error().error)}
-                             : container.error().detail),
-                    std::move(artifacts), std::nullopt, capture::Status::kCaptureFailed);
-    }
-    snapshot = std::move(*container);
-    // The container is the analysis subject: the probe (and therefore the
-    // behavior tier) now sees the sample and its synthetic module set.
-    wiring = api::detail::wire_behavior(snapshot);
+    if (!directory_mode) {
+        capture::Options capture_options;
+        capture_options.sample_path = sample;
+        capture_options.shellcode = options.shellcode;
+        const auto captured = capture::run_to_buffer(capture_options, snapshot);
+        if (captured.status != capture::Status::kOk) {
+            AnalysisArtifacts artifacts;
+            artifacts.instrumented = false;
+            return fail(AnalysisFailure::Kind::kCapture, captured.detail, std::move(artifacts));
+        }
+    } else
 #endif
+    {
+        if (!directory_mode && options.synthetic_module_dir.empty()) {
+            AnalysisArtifacts artifacts;
+            artifacts.instrumented = false;
+            return fail(AnalysisFailure::Kind::kCapture,
+                        std::string{api::detail::kMissingSyntheticModules}, std::move(artifacts),
+                        std::nullopt, capture::Status::kCaptureFailed);
+        }
+        if (const auto magic = api::detail::peek_pe_magic(sample);
+            magic.has_value() && magic.value() == 0x10B) {
+            // A host-domain boundary, distinct from the missing-directory
+            // failure in wording and status.
+            AnalysisArtifacts artifacts;
+            artifacts.instrumented = false;
+            return fail(AnalysisFailure::Kind::kCapture,
+                        std::string{api::detail::kX86SampleUnsupported}, std::move(artifacts),
+                        std::nullopt, capture::Status::kNotX64Pe);
+        }
+        auto container = engine::craft_sample_container(sample, false, options.synthetic_module_dir,
+                                                        options.system_modules_dir,
+                                                        options.system_modules_fallback);
+        if (!container) {
+            AnalysisArtifacts artifacts;
+            artifacts.instrumented = false;
+            return fail(
+                AnalysisFailure::Kind::kCapture,
+                "sample container construction failed: " +
+                    (container.error().detail.empty()
+                         ? std::string{engine::rebuild_error_message(container.error().error)}
+                         : container.error().detail),
+                std::move(artifacts), std::nullopt, capture::Status::kCaptureFailed);
+        }
+        snapshot = std::move(*container);
+        // The container is the analysis subject: the probe (and therefore the
+        // behavior tier) now sees the sample and its synthetic module set.
+    }
+    wiring = api::detail::wire_behavior(snapshot);
 
     if (!options.save_snapshot.empty()) {
         std::ofstream out(options.save_snapshot, std::ios::binary | std::ios::trunc);
@@ -284,6 +290,13 @@ UnpackOutcome unpack_sample_impl(const std::filesystem::path& sample, const Unpa
     run.synthetic_system_modules = true;
     run.synthetic_module_dir = options.synthetic_module_dir;
 #endif
+    run.system_modules_dir = options.system_modules_dir;
+    run.system_modules_fallback = options.system_modules_fallback;
+    std::vector<AnalysisModuleSource> module_sources;
+    run.module_source_sink = [&module_sources](const std::string_view module,
+                                               const std::string_view source) {
+        module_sources.push_back({std::string(module), std::string(source)});
+    };
     api::detail::EventStream stream(wiring.rules.get(), tally, collector, ledger.get(), {}, 0);
     const engine::FactChannel facts =
         api::detail::install_behavior_sinks(run, stream, instrumented ? &names : nullptr);
@@ -298,6 +311,7 @@ UnpackOutcome unpack_sample_impl(const std::filesystem::path& sample, const Unpa
                      : "no behavior instrumentation on this route; artifacts are counts only",
         result.has_value() ? std::optional{result.value()} : std::optional{result.error().stats},
         timeline_error);
+    artifacts.module_sources = std::move(module_sources);
 
     // A failed run with a dump still unpacks (the deterministic stops write
     // the dump; the packed payload's post-OEP crash on the synthetic stubs is

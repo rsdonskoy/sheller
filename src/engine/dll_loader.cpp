@@ -307,7 +307,13 @@ std::optional<std::string> synthesize_pending_load(SyscallRunState& state)
     const auto& resolve_against =
         state.loaded_modules != nullptr ? *state.loaded_modules : no_modules;
     std::vector<loader::UnresolvedImport> unresolved;
-    if (!loader::resolve_imports(*image, resolve_against, &unresolved).has_value()) {
+    // Directory mode resolves through the explicit API Set context (the
+    // directory's map restored with the run tables); the synthetic routes
+    // keep the prefix rules. The pending DLL's own name drives
+    // importer-conditional map entries.
+    if (!loader::resolve_imports(*image, resolve_against, &unresolved, state.api_set_ctx,
+                                 std::string_view(pending->name))
+             .has_value()) {
         return std::string{"pending module import resolution failed"};
     }
     if (!unresolved.empty()) {

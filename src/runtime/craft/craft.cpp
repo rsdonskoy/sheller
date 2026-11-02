@@ -40,6 +40,8 @@
 #include <string_view>
 #include <vector>
 
+#include <xxhash.h>
+
 namespace sheller::engine {
 namespace {
 
@@ -130,7 +132,9 @@ bool ordinal_exported(const loader::LoadedModule& module, const std::uint16_t or
 // but every name still resolves through the API-set host rules.
 std::expected<capture::RunnerPlan, std::string>
 admit_synth_dll_sample(const std::vector<std::uint8_t>& sample_bytes,
-                       const std::string& arrival_name, const std::filesystem::path& synth_dir)
+                       const std::string& arrival_name, const std::filesystem::path& synth_dir,
+                       const std::filesystem::path& system_modules_dir = {},
+                       const bool system_modules_fallback = false)
 {
     // The arrival name becomes the runner's path string and the emulated
     // Ldr entry's BaseDllName (bounded to 64 chars there) - enforce one
@@ -157,8 +161,89 @@ admit_synth_dll_sample(const std::vector<std::uint8_t>& sample_bytes,
     // loaded once (mapped image + name-sorted export index). resolve_export
     // walks its forwarder chains across exactly this set.
     std::vector<loader::LoadedModule> modules;
+    // Directory mode: every dependency resolves against the directory's own
+    // DLL bytes (real export tables, forwarder chains walked) - the same
+    // admission shape as the Windows capture route. The boundary pair and
+    // applicability re-verify at world construction; admission only proves
+    // symbol presence.
+    const bool directory_mode = !system_modules_dir.empty();
+    loader::ApiSetMapView directory_map;
+    loader::ApiSetContext ctx;
+    if (directory_mode) {
+        const auto read = [](const std::filesystem::path& path) {
+            std::ifstream in(path, std::ios::binary);
+            return std::vector<std::uint8_t>{std::istreambuf_iterator<char>(in),
+                                             std::istreambuf_iterator<char>()};
+        };
+        const auto ntdll = read(system_modules_dir / "ntdll.dll");
+        const auto bytes = read(system_modules_dir / "apiset-map.bin");
+        auto map = loader::ApiSetMapView::load(bytes, loader::kApiSetMapArchX64,
+                                               XXH64(ntdll.data(), ntdll.size(), 0));
+        if (!map) {
+            return std::unexpected("apiset-map.bin: " + map.error().detail);
+        }
+        directory_map = std::move(*map);
+        ctx.mode = loader::ApiSetContext::Mode::kDirectoryMap;
+        ctx.directory_map = &directory_map;
+    }
+
     const auto load_synth_module = [&](const std::string& original_name)
         -> std::expected<const loader::LoadedModule*, std::string> {
+        if (directory_mode) {
+            auto host = folded(original_name);
+            if (host.starts_with("api-ms-") || host.starts_with("ext-ms-")) {
+                if (host.ends_with(".dll")) {
+                    host.resize(host.size() - 4);
+                }
+                const auto mapped = directory_map.host_for(host, arrival_name);
+                if (!mapped) {
+                    return std::unexpected("api set not mapped: " + original_name);
+                }
+                host = folded(*mapped);
+            }
+            if (!host.ends_with(".dll")) {
+                host += ".dll";
+            }
+            if (host.size() >= 64 || host.find_first_of("/\\:") != std::string::npos ||
+                host.find("..") != std::string::npos) {
+                return std::unexpected("path-shaped dependency: " + original_name);
+            }
+            for (const auto& module : modules) {
+                if (std::string_view(module.name.data()) == host) {
+                    return &module;
+                }
+            }
+            auto path = system_modules_dir / host;
+            std::error_code ec;
+            if (!std::filesystem::exists(path, ec) || ec) {
+                if (!system_modules_fallback || synth_dir.empty()) {
+                    return std::unexpected("missing system module: " + host);
+                }
+                path = synth_dir / (host.substr(0, host.size() - 4) + ".x64.dll");
+            }
+            std::ifstream in(path, std::ios::binary);
+            if (!in) {
+                return std::unexpected("system module unreadable: " + host);
+            }
+            const std::vector<std::uint8_t> bytes{std::istreambuf_iterator<char>(in),
+                                                  std::istreambuf_iterator<char>()};
+            const auto info = loader::parse_pe(bytes);
+            if (!info || info->bitness != loader::kBitness64) {
+                return std::unexpected("system module is not an x64 PE: " + host);
+            }
+            auto image = loader::build_image(bytes, *info);
+            if (!image) {
+                return std::unexpected("system module could not be mapped: " + host);
+            }
+            loader::LoadedModule module;
+            module.image = std::move(*image);
+            std::memcpy(module.name.data(), host.data(), host.size());
+            if (!loader::index_exports(module)) {
+                return std::unexpected("system module export table unreadable: " + host);
+            }
+            modules.push_back(std::move(module));
+            return &modules.back();
+        }
         const std::string key = folded(original_name);
         for (const auto& module : modules) {
             if (folded(std::string_view(module.name.data())) == key) {
@@ -261,10 +346,37 @@ admit_synth_dll_sample(const std::vector<std::uint8_t>& sample_bytes,
             if (folded(import.module) != key) {
                 continue;
             }
-            const auto& loaded = **loaded_module;
-            const bool ok = import.name.empty()
-                                ? ordinal_exported(loaded, import.ordinal)
-                                : loader::resolve_export(modules, key, import.name).ok;
+            bool ok = false;
+            if (directory_mode) {
+                // Retry only a missing chain endpoint. Each retry must grow
+                // the module set; cycles and missing symbols fail closed.
+                for (std::size_t hop = 0; hop < 8; ++hop) {
+                    const auto resolved =
+                        import.name.empty()
+                            ? loader::resolve_ordinal_export(modules, key, import.ordinal, ctx,
+                                                             arrival_name)
+                            : loader::resolve_export(modules, key, import.name, ctx, arrival_name);
+                    if (resolved.ok) {
+                        ok = true;
+                        break;
+                    }
+                    if (resolved.unmapped_api_set || resolved.missing_module.empty()) {
+                        break;
+                    }
+                    const auto count = modules.size();
+                    const auto next = load_synth_module(resolved.missing_module);
+                    if (!next) {
+                        return std::unexpected(next.error());
+                    }
+                    if (modules.size() == count) {
+                        break;
+                    }
+                }
+            } else {
+                const auto& loaded = **loaded_module;
+                ok = import.name.empty() ? ordinal_exported(loaded, import.ordinal)
+                                         : loader::resolve_export(modules, key, import.name).ok;
+            }
             if (!ok) {
                 continue;
             }
@@ -375,14 +487,16 @@ std::expected<std::vector<std::uint8_t>, RebuildFailure>
 craft_dll_sample_container(const std::filesystem::path& pe_path,
                            const std::vector<std::uint8_t>& sample_bytes, const bool fidelity_seams,
                            const std::filesystem::path& synthetic_module_dir,
-                           const capture::PeImageInfo& info)
+                           const std::filesystem::path& system_modules_dir,
+                           const bool system_modules_fallback, const capture::PeImageInfo& info)
 {
     if (info.bitness != 64) {
         return std::unexpected(failure(RebuildError::kBitnessUnsupported,
                                        std::string{"DLL input is only supported for x64 images"}));
     }
     const std::string arrival_name = pe_path.filename().string();
-    const auto plan = admit_synth_dll_sample(sample_bytes, arrival_name, synthetic_module_dir);
+    const auto plan = admit_synth_dll_sample(sample_bytes, arrival_name, synthetic_module_dir,
+                                             system_modules_dir, system_modules_fallback);
     if (!plan) {
         return std::unexpected(
             failure(RebuildError::kBadSnapshot, "DLL input rejected: " + plan.error()));
@@ -410,7 +524,8 @@ craft_dll_sample_container(const std::filesystem::path& pe_path,
             return std::unexpected(failure(RebuildError::kIoFailure));
         }
     }
-    auto guest = prepare_pe_file(runner_path, fidelity_seams, synthetic_module_dir);
+    auto guest = prepare_pe_file(runner_path, fidelity_seams, synthetic_module_dir,
+                                 system_modules_dir, system_modules_fallback);
     std::error_code remove_ec;
     std::filesystem::remove(runner_path, remove_ec); // best effort: the world is built
     if (!guest) {
@@ -431,9 +546,11 @@ craft_container_from_guest(const PreparedGuest& guest)
 
 std::expected<std::vector<std::uint8_t>, RebuildFailure>
 craft_sample_container(const std::filesystem::path& pe_path, const bool fidelity_seams,
-                       const std::filesystem::path& synthetic_module_dir)
+                       const std::filesystem::path& synthetic_module_dir,
+                       const std::filesystem::path& system_modules_dir,
+                       const bool system_modules_fallback)
 {
-    if (synthetic_module_dir.empty()) {
+    if (system_modules_dir.empty() && synthetic_module_dir.empty()) {
         return std::unexpected(failure(RebuildError::kSyntheticModulesMissing));
     }
     std::ifstream in(pe_path, std::ios::binary);
@@ -450,13 +567,15 @@ craft_sample_container(const std::filesystem::path& pe_path, const bool fidelity
         capture::parse_pe_headers(sample.data(), sample.size(), info) == capture::PeError::kNone &&
         info.is_dll;
     if (!is_dll) {
-        auto guest = prepare_pe_file(pe_path, fidelity_seams, synthetic_module_dir);
+        auto guest = prepare_pe_file(pe_path, fidelity_seams, synthetic_module_dir,
+                                     system_modules_dir, system_modules_fallback);
         if (!guest) {
             return std::unexpected(guest.error());
         }
         return serialize_guest(*guest, nullptr);
     }
-    return craft_dll_sample_container(pe_path, sample, fidelity_seams, synthetic_module_dir, info);
+    return craft_dll_sample_container(pe_path, sample, fidelity_seams, synthetic_module_dir,
+                                      system_modules_dir, system_modules_fallback, info);
 }
 
 } // namespace sheller::engine

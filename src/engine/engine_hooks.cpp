@@ -105,6 +105,32 @@ bool on_mem_write_prot_callback(uc_engine* const uc, const uc_mem_type, const st
 // Block hook of the syscall run: bumps the block counter and, when an event
 // sink is attached, emits block-exec with the block start address (the hook
 // address is the block start). Hot path: no allocation, no IO.
+void on_boundary_trap(uc_engine* uc, const std::uint64_t address, const std::uint32_t,
+                      void* const user_data)
+{
+    auto* state = static_cast<SyscallRunState*>(user_data);
+    if (state->boundary_trap.fired) {
+        return;
+    }
+    auto& diagnosis = state->boundary_trap;
+    diagnosis.fired = true;
+    diagnosis.va = address;
+    const auto named = state->boundary_trap_names.find(address);
+    if (named != state->boundary_trap_names.end()) {
+        diagnosis.module = std::get<0>(named->second);
+        diagnosis.name = std::get<1>(named->second);
+        diagnosis.ordinal = std::get<2>(named->second);
+    }
+    std::uint64_t caller = 0;
+    static_cast<void>(uc_mem_read(uc, read_rsp(uc), &caller, sizeof caller));
+    diagnosis.caller = caller;
+    // the deliberate stop: not a crash, not a completed call - the caller's
+    // successor instructions never execute
+    state->terminated = false;
+    state->exit_code = 0;
+    uc_emu_stop(uc);
+}
+
 void on_syscall_run_block(uc_engine* uc, const std::uint64_t address, const std::uint32_t,
                           void* const user_data)
 {

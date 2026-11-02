@@ -52,6 +52,11 @@ find_package(CLI11 CONFIG REQUIRED)
 # allocation and no global state, matching the hook hot-path discipline.
 find_package(Zydis CONFIG REQUIRED)
 
+# xxhash binds the directory-mode boundary manifest and API Set map to their
+# input images (whole-file xxhash64 anchors, design D2/D5 of
+# real-dll-module-dir).
+find_package(xxHash CONFIG REQUIRED)
+
 # Warnings-as-errors and hardening flags apply to first-party targets only
 # (rationale lives in CONTRIBUTING.md).
 function(sheller_apply_common target)
@@ -107,6 +112,7 @@ target_include_directories(sheller_engine
 target_include_directories(sheller_engine SYSTEM PRIVATE ${SHELLER_UNICORN_INCLUDE_DIR})
 target_link_libraries(sheller_engine PUBLIC ${SHELLER_UNICORN_LIBRARY})
 target_link_libraries(sheller_engine PUBLIC Zydis::Zydis)
+target_link_libraries(sheller_engine PUBLIC xxHash::xxhash)
 if(MSVC)
   target_compile_options(sheller_engine PRIVATE /external:W0)
 endif()

@@ -15,6 +15,7 @@
 #include <functional>
 #include <map>
 #include <span>
+#include <string>
 #include <string_view>
 #include <vector>
 
@@ -73,6 +74,16 @@ struct SyscallRunOptions {
     // engine's interception layer (heap family, LdrLoadDll) serves them.
     bool synthetic_system_modules{false};
     std::filesystem::path synthetic_module_dir;
+    // Directory-mode system modules (change real-dll-module-dir): when set,
+    // the resident set comes strictly from this directory - real DLL bytes
+    // for every module except the boundary pair (ntdll, win32u), which
+    // derives under the committed boundary manifest. The host system
+    // directories are never read. With the fallback option on, a closure
+    // member the directory lacks falls back to the synthetic directory and
+    // is marked in the module source table; with it off, the missing module
+    // is a named construction rejection.
+    std::filesystem::path system_modules_dir;
+    bool system_modules_fallback{false};
     // When a basic block STARTS
     // exactly on one of the watched addresses (e.g. ntdll heap-function
     // entries, or call return sites added mid-run by the harness),
@@ -123,6 +134,14 @@ struct SyscallRunOptions {
     // the run and flushes (module, name, count) per entry once at run end -
     // never on the hook hot path. Empty = the engine registers no stub hook.
     std::function<void(std::uint16_t module, std::string_view name, std::uint64_t count)> stub_sink;
+    // Module source table delivery (change real-dll-module-dir): the engine
+    // calls this once per run, one row per resident system module, right
+    // after the loader world is built - before the first instruction
+    // executes, so a run that later fails still delivers its provenance.
+    // Folded module name + source-class spelling ("directory-derived",
+    // "directory-real-bytes", "fallback-synthetic", "synthetic",
+    // "host-system"). Empty = no delivery, zero cost.
+    std::function<void(std::string_view module, std::string_view source)> module_source_sink;
     // (The rules layer's fact seam is deliberately absent: facts cross the
     // engine boundary through an internal channel beside these options and
     // reach hosts only as forwarded events - see src/engine/behavior_fact.h.)
@@ -148,6 +167,11 @@ enum class SyscallRunError {
     // synthetic module directory: the synthetic-world tables cannot be
     // rebuilt, so the run is refused instead of silently losing behavior.
     kSyntheticModulesMissing,
+    // Directory mode: the guest called a boundary export whose manifest
+    // disposition is the unsupported trap. A deliberate, named stop -
+    // distinct from crash fallback and budget expiry; the failure's detail
+    // names module!export, the ordinal and the call site.
+    kBoundaryTrap,
 };
 
 struct SyscallRunStats {
@@ -185,6 +209,9 @@ struct SyscallRunFailure {
     std::uint32_t unicorn_code{};
     // Partial statistics - filled when the bounded run did execute.
     SyscallRunStats stats{};
+    // Named diagnosis text (kBoundaryTrap: "boundary-trap: module!export
+    // (ordinal N) at 0x... called from 0x..."); empty for the other kinds.
+    std::string detail;
 };
 
 std::string_view syscall_run_error_message(SyscallRunError error);

@@ -270,15 +270,59 @@ std::expected<void, SyscallRunFailure> assemble_run_state(PreparedGuest& guest,
         state.intercept_names.push_back(std::move(name));
         state.intercept_modules.push_back(module_index_for_va(va));
     }
-    for (const auto& entry : state.loader_exports) {
-        const auto intercepted =
-            std::find(state.intercept_vas.begin(), state.intercept_vas.end(), entry.function_va);
-        if (intercepted != state.intercept_vas.end()) {
-            continue; // intercepted exports emit apicall events, not counts
+    if (guest.directory_mode) {
+        // directory mode counts ONLY the explicit whitelist (derived compat
+        // stubs plus fallback synthetic exports) - the "every non-intercepted
+        // export is a stub" inference is a synthetic-mode rule and would
+        // miscount real bodies, data slots, syscall stubs and traps. Alias
+        // names sharing one VA land in one slot: the first whitelist row is
+        // the stable canonical name.
+        for (const auto& entry : guest.stub_whitelist) {
+            if (std::find(state.intercept_vas.begin(), state.intercept_vas.end(),
+                          entry.function_va) != state.intercept_vas.end()) {
+                continue;
+            }
+            if (state.stub_slots.find(entry.function_va) != state.stub_slots.end()) {
+                continue; // shared VA alias: one slot, one count
+            }
+            const auto slot = static_cast<std::uint32_t>(state.stub_entries.size());
+            state.stub_entries.push_back({module_index_for_va(entry.function_va), entry.name, 0});
+            state.stub_slots.emplace(entry.function_va, slot);
         }
-        const auto slot = static_cast<std::uint32_t>(state.stub_entries.size());
-        state.stub_entries.push_back({module_index_for_va(entry.function_va), entry.name, 0});
-        state.stub_slots.emplace(entry.function_va, slot);
+        state.boundary_trap_vas = guest.boundary_trap_vas;
+        state.boundary_trap_names = guest.boundary_trap_names;
+        state.directory_mode = true;
+        state.api_set_ctx.mode = loader::ApiSetContext::Mode::kDirectoryMap;
+        state.api_set_ctx.directory_map = &guest.api_set_map;
+        for (const auto va : guest.boundary_trap_vas) {
+            // an intercept registration on the same VA supersedes the trap:
+            // the engine answers the call in the hook and the ud2 body is
+            // never reached (the manifest row stays trap-classified; the
+            // interception layer is the engine support landing on it)
+            const auto intercepted =
+                std::find(state.intercept_vas.begin(), state.intercept_vas.end(), va) !=
+                state.intercept_vas.end();
+            if (intercepted) {
+                continue;
+            }
+            uc_hook trap_hook = 0;
+            if (uc_hook_add(guest.unicorn.get(), &trap_hook, UC_HOOK_CODE,
+                            reinterpret_cast<void*>(on_boundary_trap), &state, va,
+                            va) != UC_ERR_OK) {
+                return std::unexpected(SyscallRunFailure{SyscallRunError::kUnicornFailure});
+            }
+        }
+    } else {
+        for (const auto& entry : state.loader_exports) {
+            const auto intercepted = std::find(state.intercept_vas.begin(),
+                                               state.intercept_vas.end(), entry.function_va);
+            if (intercepted != state.intercept_vas.end()) {
+                continue; // intercepted exports emit apicall events, not counts
+            }
+            const auto slot = static_cast<std::uint32_t>(state.stub_entries.size());
+            state.stub_entries.push_back({module_index_for_va(entry.function_va), entry.name, 0});
+            state.stub_slots.emplace(entry.function_va, slot);
+        }
     }
     if (static_cast<bool>(state.stub_sink) && !state.stub_entries.empty()) {
         for (const auto& mod : state.loader_modules) {
@@ -700,6 +744,14 @@ finish_run(SyscallRunState& state, PreparedGuest& guest, const SyscallRunOptions
 std::expected<SyscallRunStats, SyscallRunFailure>
 run_syscalls(PreparedGuest& guest, const SyscallRunOptions& options, const FactChannel& facts)
 {
+    // The module source table is a construction fact: deliver it before any
+    // state assembly or hook registration can fail the run - a run that
+    // never executes still carries its provenance.
+    if (options.module_source_sink) {
+        for (const auto& [name, source] : guest.module_sources) {
+            options.module_source_sink(name, system_module_source_spelling(source));
+        }
+    }
     SyscallRunState state;
     if (const auto assembled = assemble_run_state(guest, options, facts, state); !assembled) {
         return std::unexpected(assembled.error());
@@ -1208,6 +1260,19 @@ finish_run(SyscallRunState& state, PreparedGuest& guest, const SyscallRunOptions
         }
     }
 
+    // The boundary-trap stop: a deliberate, named termination - never a
+    // crash, never a budget expiry, never a completed call.
+    if (state.boundary_trap.fired) {
+        stats.terminated = false;
+        auto detail = std::format("boundary-trap: {}!{} (ordinal {}) at 0x{:x} called from 0x{:x}",
+                                  state.boundary_trap.module, state.boundary_trap.name,
+                                  state.boundary_trap.ordinal, state.boundary_trap.va,
+                                  state.boundary_trap.caller);
+        sheller::log::write(sheller::log::level::kWarning, "sheller run: " + detail);
+        SyscallRunFailure failure{SyscallRunError::kBoundaryTrap, 0, stats};
+        failure.detail = std::move(detail);
+        return std::unexpected(failure);
+    }
     // unicorn2 stops silently (UC_ERR_OK) when the count or the timeout
     // expires; only real emulation faults come back as errors here.
     if (state.unhandled) {
