@@ -309,7 +309,8 @@ std::expected<void, SyscallRunFailure> assemble_run_state(PreparedGuest& guest,
             if (uc_hook_add(guest.unicorn.get(), &trap_hook, UC_HOOK_CODE,
                             reinterpret_cast<void*>(on_boundary_trap), &state, va,
                             va) != UC_ERR_OK) {
-                return std::unexpected(SyscallRunFailure{SyscallRunError::kUnicornFailure, {}, {}, {}});
+                return std::unexpected(
+                    SyscallRunFailure{SyscallRunError::kUnicornFailure, {}, {}, {}});
             }
         }
     } else {
@@ -330,7 +331,8 @@ std::expected<void, SyscallRunFailure> assemble_run_state(PreparedGuest& guest,
             if (uc_hook_add(guest.unicorn.get(), &stub_hook, UC_HOOK_CODE,
                             reinterpret_cast<void*>(on_stub_code), &state, mod.base,
                             mod.base + mod.size) != UC_ERR_OK) {
-                return std::unexpected(SyscallRunFailure{SyscallRunError::kUnicornFailure, {}, {}, {}});
+                return std::unexpected(
+                    SyscallRunFailure{SyscallRunError::kUnicornFailure, {}, {}, {}});
             }
         }
     }
@@ -564,8 +566,8 @@ std::expected<void, SyscallRunFailure> run_tls_callback_legs(PreparedGuest& gues
         }
         tls_error = uc_emu_start(guest.unicorn.get(), callback, magic, 0, kTlsLegBudget);
         if (tls_error != UC_ERR_OK) {
-            return std::unexpected(SyscallRunFailure{SyscallRunError::kEmulationFailure,
-                                                     static_cast<std::uint32_t>(tls_error), {}, {}});
+            return std::unexpected(SyscallRunFailure{
+                SyscallRunError::kEmulationFailure, static_cast<std::uint32_t>(tls_error), {}, {}});
         }
     }
     return {};
@@ -654,7 +656,8 @@ std::expected<void, SyscallRunFailure> register_run_hooks(PreparedGuest& guest,
             if (uc_hook_add(guest.unicorn.get(), &read_window, UC_HOOK_MEM_READ,
                             reinterpret_cast<void*>(on_behavior_mem_read), &state, page,
                             page + kLedgerPageSize) != UC_ERR_OK) {
-                return std::unexpected(SyscallRunFailure{SyscallRunError::kUnicornFailure, {}, {}, {}});
+                return std::unexpected(
+                    SyscallRunFailure{SyscallRunError::kUnicornFailure, {}, {}, {}});
             }
         }
         if (sample_image_size != 0) {
@@ -663,7 +666,8 @@ std::expected<void, SyscallRunFailure> register_run_hooks(PreparedGuest& guest,
                             reinterpret_cast<void*>(on_behavior_code), &state,
                             guest.metadata.image_base,
                             guest.metadata.image_base + sample_image_size) != UC_ERR_OK) {
-                return std::unexpected(SyscallRunFailure{SyscallRunError::kUnicornFailure, {}, {}, {}});
+                return std::unexpected(
+                    SyscallRunFailure{SyscallRunError::kUnicornFailure, {}, {}, {}});
             }
         }
     }
@@ -721,7 +725,8 @@ std::expected<void, SyscallRunFailure> register_run_hooks(PreparedGuest& guest,
                                 reinterpret_cast<void*>(on_rtl_unwind_ex), &state,
                                 state.rtl_unwind_address,
                                 state.rtl_unwind_address + 1) != UC_ERR_OK) {
-                    return std::unexpected(SyscallRunFailure{SyscallRunError::kUnicornFailure, {}, {}, {}});
+                    return std::unexpected(
+                        SyscallRunFailure{SyscallRunError::kUnicornFailure, {}, {}, {}});
                 }
             }
         }
@@ -930,7 +935,8 @@ run_syscalls(PreparedGuest& guest, const SyscallRunOptions& options, const FactC
                     state.unhandled = true;
                     break;
                 case DispatchOutcome::kEngineError:
-                    return std::unexpected(SyscallRunFailure{SyscallRunError::kEmulationFailure, {}, {}, {}});
+                    return std::unexpected(
+                        SyscallRunFailure{SyscallRunError::kEmulationFailure, {}, {}, {}});
                 }
                 break;
             }
@@ -967,7 +973,8 @@ run_syscalls(PreparedGuest& guest, const SyscallRunOptions& options, const FactC
                     state.unhandled = true;
                     break;
                 case seh::Step::EngineError:
-                    return std::unexpected(SyscallRunFailure{SyscallRunError::kEmulationFailure, {}, {}, {}});
+                    return std::unexpected(
+                        SyscallRunFailure{SyscallRunError::kEmulationFailure, {}, {}, {}});
                 }
                 break;
             }
@@ -979,7 +986,8 @@ run_syscalls(PreparedGuest& guest, const SyscallRunOptions& options, const FactC
                 state.unhandled = true;
                 break;
             case DispatchOutcome::kEngineError:
-                return std::unexpected(SyscallRunFailure{SyscallRunError::kEmulationFailure, {}, {}, {}});
+                return std::unexpected(
+                    SyscallRunFailure{SyscallRunError::kEmulationFailure, {}, {}, {}});
             }
             break;
         }
@@ -1007,7 +1015,8 @@ run_syscalls(PreparedGuest& guest, const SyscallRunOptions& options, const FactC
                 state.unhandled = true;
                 break;
             case seh::Step::EngineError:
-                return std::unexpected(SyscallRunFailure{SyscallRunError::kEmulationFailure, {}, {}, {}});
+                return std::unexpected(
+                    SyscallRunFailure{SyscallRunError::kEmulationFailure, {}, {}, {}});
             }
             break;
         }
@@ -1038,7 +1047,8 @@ run_syscalls(PreparedGuest& guest, const SyscallRunOptions& options, const FactC
                 state.unhandled = true;
                 break;
             case seh::Step::EngineError:
-                return std::unexpected(SyscallRunFailure{SyscallRunError::kEmulationFailure, {}, {}, {}});
+                return std::unexpected(
+                    SyscallRunFailure{SyscallRunError::kEmulationFailure, {}, {}, {}});
             }
             break;
         }
@@ -1129,10 +1139,12 @@ run_syscalls(PreparedGuest& guest, const SyscallRunOptions& options, const FactC
                 }
                 if (cur.context == nullptr &&
                     uc_context_alloc(guest.unicorn.get(), &cur.context) != UC_ERR_OK) {
-                    return std::unexpected(SyscallRunFailure{SyscallRunError::kUnicornFailure, {}, {}, {}});
+                    return std::unexpected(
+                        SyscallRunFailure{SyscallRunError::kUnicornFailure, {}, {}, {}});
                 }
                 if (uc_context_save(guest.unicorn.get(), cur.context) != UC_ERR_OK) {
-                    return std::unexpected(SyscallRunFailure{SyscallRunError::kUnicornFailure, {}, {}, {}});
+                    return std::unexpected(
+                        SyscallRunFailure{SyscallRunError::kUnicornFailure, {}, {}, {}});
                 }
                 // pick the next non-finished thread (round-robin, may be us)
                 std::size_t next = sched.current;
@@ -1326,12 +1338,12 @@ finish_run(SyscallRunState& state, PreparedGuest& guest, const SyscallRunOptions
                 rip, rsp, rax, rcx, rdx, rdi, ntdll_base, perm_probe, hex);
             sheller::log::write(sheller::log::level::kWarning, crash);
         }
-        return std::unexpected(SyscallRunFailure{SyscallRunError::kUnhandledException, 0, stats, {}});
+        return std::unexpected(
+            SyscallRunFailure{SyscallRunError::kUnhandledException, 0, stats, {}});
     }
     if (run_error != UC_ERR_OK) {
-        return std::unexpected(SyscallRunFailure{SyscallRunError::kEmulationFailure,
-                                                 static_cast<std::uint32_t>(run_error), stats,
-                                                 {}});
+        return std::unexpected(SyscallRunFailure{
+            SyscallRunError::kEmulationFailure, static_cast<std::uint32_t>(run_error), stats, {}});
     }
     if (state.xfer_stop_reached) {
         return stats; // deliberate stop: success, guest did not terminate

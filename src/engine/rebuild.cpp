@@ -138,7 +138,8 @@ std::string_view syscall_run_error_message(const SyscallRunError error)
     case SyscallRunError::kSyntheticModulesMissing:
         return "synthetic system modules required to replay this container (none provided)";
     case SyscallRunError::kBoundaryTrap:
-        return "unsupported boundary function stopped the run (the named diagnosis rides the detail)";
+        return "unsupported boundary function stopped the run (the named diagnosis rides the "
+               "detail)";
     }
     return "unknown syscall run error";
 }
@@ -219,8 +220,7 @@ run_pe_file_with_facts(const std::filesystem::path& pe_path, const SyscallRunOpt
     // Windows route does.
     auto container = craft_sample_container(
         pe_path, options.windows_fidelity_dispatch,
-        options.synthetic_system_modules ? options.synthetic_module_dir
-                                         : std::filesystem::path{},
+        options.synthetic_system_modules ? options.synthetic_module_dir : std::filesystem::path{},
         options.system_modules_dir, options.system_modules_fallback);
     if (!container) {
         return std::unexpected(run_failure_of(container.error()));
