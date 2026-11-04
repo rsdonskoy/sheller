@@ -8,6 +8,7 @@
 #include "esp_target.h"
 #include "exception_pipeline.h"
 #include "intercept.h"
+#include "run_facts.h"
 #include "syscall_dispatch.h"
 
 #include "../syscalls/syscall_number_map.h"
@@ -84,10 +85,9 @@ std::expected<BoundedRun, RebuildFailure> run_entry_proof(PreparedGuest& guest)
 // sinks and the run-scoped tables (intercepts, stubs, resolved Nt names),
 // and reserves the engine-dispatch trampoline plus the deterministic
 // allocator cursors.
-std::expected<void, SyscallRunFailure> assemble_run_state(PreparedGuest& guest,
-                                                          const SyscallRunOptions& options,
-                                                          const FactChannel& facts,
-                                                          SyscallRunState& state)
+std::expected<void, SyscallRunFailure>
+assemble_run_state(PreparedGuest& guest, const SyscallRunOptions& options, const FactChannel& facts,
+                   const GuestFacts& guest_facts, SyscallRunState& state)
 {
     // The syscall run executes the sample's real code, so the entry spin the
     // capture path wrote must go: restore the original bytes from the
@@ -110,45 +110,11 @@ std::expected<void, SyscallRunFailure> assemble_run_state(PreparedGuest& guest,
     state.behavior_sink = facts.behavior_sink;
     state.module_sink = facts.module_sink;
     state.region_map = &guest.map;
-    state.relative_base = guest.relative_base;
-    // The captured process's own current directory is the faithful base for
-    // relative guest paths: PEB->ProcessParameters->CurrentDirectory (a
-    // CURDIR {UNICODE_STRING, HANDLE}). The snapshot route photographs it,
-    // so replay resolves exactly where the real process would have.
-    {
-        // RTL_USER_PROCESS_PARAMETERS->CurrentDirectory (Win11 24H2 x64:
-        // the CURDIR sits at +0x38; its DosPath UNICODE_STRING buffer
-        // pointer at +0x48). Verified against the captured packed sample.
-        const auto peb = guest.metadata.peb_address;
-        if (peb != 0) {
-            std::uint64_t params = 0;
-            std::uint64_t buffer = 0;
-            std::uint16_t len = 0;
-            if (uc_mem_read(guest.unicorn.get(), peb + 0x20, &params, sizeof params) == UC_ERR_OK &&
-                params != 0 &&
-                uc_mem_read(guest.unicorn.get(), params + 0x40, &len, sizeof len) == UC_ERR_OK &&
-                uc_mem_read(guest.unicorn.get(), params + 0x48, &buffer, sizeof buffer) ==
-                    UC_ERR_OK &&
-                len >= 2 && len % 2 == 0) {
-                // u16 (not wstring): std::u16string is a standard fs::path
-                // source on every host; a wstring source compiles only on
-                // Windows and aborts the Linux build.
-                std::u16string wide(len / 2, u'\0');
-                if (uc_mem_read(guest.unicorn.get(), buffer, wide.data(),
-                                wide.size() * sizeof(char16_t)) == UC_ERR_OK) {
-                    constexpr char16_t kSep = u'\\';
-                    if (!wide.empty() && wide.back() != kSep) {
-                        wide.push_back(kSep);
-                    }
-                    std::error_code ec;
-                    const std::filesystem::path cwd{wide};
-                    if (cwd.is_absolute() && std::filesystem::is_directory(cwd, ec)) {
-                        state.relative_base = cwd;
-                    }
-                }
-            }
-        }
-    }
+    // The PEB-derived current directory is a read-only fact now
+    // (snapshot_guest_facts): it carries the captured process's own directory
+    // when that derivation succeeds and the guest's own base otherwise, so
+    // this is already the resolved value.
+    state.relative_base = guest_facts.relative_base;
     state.max_blocks = options.max_blocks;
     state.xfer_number = options.xfer_number;
     state.esp_stop_goal = options.esp_stop_goal;
@@ -224,23 +190,12 @@ std::expected<void, SyscallRunFailure> assemble_run_state(PreparedGuest& guest,
     // the counting table (hook bumps a slot counter; the run end drains
     // once into options.stub_sink, off the hot path).
     state.stub_sink = options.stub_sink;
-    // Resolve number -> Nt name once (real ntdll stubs
-    // only; synthetic 0x1000+ numbers never collide). One allocation, off
-    // the hook hot path.
-    for (const auto& mod : state.loader_modules) {
-        if (fold_name(std::string_view(mod.name.data())) != "ntdll") {
-            continue;
-        }
-        for (const auto& entry :
-             syscalls::enumerate_ntdll_syscalls(guest.unicorn.get(), mod.base)) {
-            state.syscall_numbers_by_name.emplace(std::string(entry.name.data()), entry.number);
-        }
-        state.syscall_names.clear();
-        for (const auto& [name, number] : state.syscall_numbers_by_name) {
-            state.syscall_names.emplace(number, name);
-        }
-        break;
-    }
+    // Number <-> Nt name were resolved once as read-only facts
+    // (snapshot_guest_facts): real ntdll stubs only, so synthetic 0x1000+
+    // numbers never collide, and both maps are copies of that result - off the
+    // hook hot path.
+    state.syscall_numbers_by_name = guest_facts.syscall_numbers_by_name;
+    state.syscall_names = guest_facts.syscall_names;
     state.intercept_names.clear();
     state.intercept_modules.clear();
     state.stub_slots.clear();
@@ -771,24 +726,24 @@ run_syscalls(PreparedGuest& guest, const SyscallRunOptions& options, const FactC
         }
     }
     SyscallRunState state;
-    if (const auto assembled = assemble_run_state(guest, options, facts, state); !assembled) {
+    // The read-only facts are gathered once, before any write assembly: the
+    // PEB-derived cwd, the ntdll number <-> name tables, and the sample
+    // module's index/image span feed both the state assembly and the write
+    // ledger below.
+    const GuestFacts guest_facts = snapshot_guest_facts(guest);
+    if (const auto assembled = assemble_run_state(guest, options, facts, guest_facts, state);
+        !assembled) {
         return std::unexpected(assembled.error());
     }
     std::uint64_t ntdll_base = seed_policy_and_normalize(guest, options, state);
-    // Write ledger: every guest memory write marks its page
-    // dirty in the owning snapshot region. Writer attribution needs the
-    // sample's full image span (base + SizeOfImage from the module record
-    // at the snapshot image base) - a capture splits the image into several
-    // protection regions, so a bare base check would drop the body writes.
-    std::uint64_t sample_image_size = 0;
-    for (std::size_t i = 0; i < guest.map.module_count(); ++i) {
-        if (guest.map.module(i).base == guest.metadata.image_base) {
-            sample_image_size = guest.map.module(i).size;
-            state.sample_module_known = true;
-            state.sample_module_index = i;
-            break;
-        }
-    }
+    // Write ledger: every guest memory write marks its page dirty in the
+    // owning snapshot region. Writer attribution needs the sample's full image
+    // span (base + SizeOfImage from the module record at the snapshot image
+    // base) - a capture splits the image into several protection regions, so a
+    // bare base check would drop the body writes.
+    state.sample_module_known = guest_facts.sample_module_known;
+    state.sample_module_index = guest_facts.sample_module_index;
+    const std::uint64_t sample_image_size = guest_facts.sample_image_size;
     MemWriteLedger write_ledger(guest.regions, guest.metadata.image_base, sample_image_size);
 
     uc_hook mem_write_hook = 0;
