@@ -295,8 +295,14 @@ TEST(AdmissionDiff, BothRoutesProduceTheSamePlan)
 TEST(AdmissionDiff, PlanTextMatchesGolden)
 {
     const fs::path golden_dir{ADMISSION_PLAN_DIR};
+#if defined(_MSC_VER)
+#pragma warning(push)
 #pragma warning(disable : 4996) // getenv is fine in a test
+#endif
     const bool write_mode = std::getenv("SHELLER_ADMISSION_PLAN_WRITE") != nullptr;
+#if defined(_MSC_VER)
+#pragma warning(pop)
+#endif
     for (const auto& sample : corpus()) {
         const auto synth = synth_plan(sample);
         ASSERT_TRUE(synth.has_value()) << sample.arrival << ": " << synth.error();

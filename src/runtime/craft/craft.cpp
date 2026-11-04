@@ -180,7 +180,7 @@ class SyntheticModuleSource final : public capture::ModuleSource {
         // The base pair's host must exist even though it contributes no runner
         // import: a world without kernel32 cannot answer the stub's calls.
         std::string error;
-        if (load_module("kernel32.dll", error) == nullptr) {
+        if (load_module("kernel32.dll", error) == kNoModule) {
             return std::unexpected(std::move(error));
         }
         return {};
@@ -189,11 +189,10 @@ class SyntheticModuleSource final : public capture::ModuleSource {
     capture::ModuleView* acquire(const std::string_view spelled, const std::string_view folded,
                                  std::string& error) override
     {
-        const loader::LoadedModule* loaded = load_module(std::string{folded}, error);
-        if (loaded == nullptr) {
+        const std::size_t index = load_module(std::string{folded}, error);
+        if (index == kNoModule) {
             return nullptr;
         }
-        const auto index = static_cast<std::size_t>(loaded - modules_.data());
         views_.emplace_back(this, std::string{spelled}, std::string{folded}, index);
         return &views_.back();
     }
@@ -223,7 +222,7 @@ class SyntheticModuleSource final : public capture::ModuleSource {
                 }
                 const auto count = modules_.size();
                 std::string load_error;
-                if (load_module(resolved.missing_module, load_error) == nullptr) {
+                if (load_module(resolved.missing_module, load_error) == kNoModule) {
                     return std::unexpected(std::move(load_error));
                 }
                 if (modules_.size() == count) {
@@ -254,10 +253,14 @@ class SyntheticModuleSource final : public capture::ModuleSource {
     }
 
   private:
-    // Loads a module into the store (or finds it there) and returns its
-    // element. `original_name` is the folded lookup key; error text is the
-    // synthetic route's own wording, in the store's folded spelling.
-    const loader::LoadedModule* load_module(const std::string& original_name, std::string& error)
+    static constexpr std::size_t kNoModule = static_cast<std::size_t>(-1);
+
+    // Loads a module into the store (or finds it there) and returns its index,
+    // never a pointer: the store grows on directory-mode forwarder retries, and
+    // a vector element address is not stable across that growth.
+    // `original_name` is the folded lookup key; error text is the synthetic
+    // route's own wording, in the store's folded spelling.
+    std::size_t load_module(const std::string& original_name, std::string& error)
     {
         if (directory_mode_) {
             auto host = capture::fold_module_name(original_name);
@@ -268,7 +271,7 @@ class SyntheticModuleSource final : public capture::ModuleSource {
                 const auto mapped = directory_map_.host_for(host, arrival_name_);
                 if (!mapped) {
                     error = "api set not mapped: " + original_name;
-                    return nullptr;
+                    return kNoModule;
                 }
                 host = capture::fold_module_name(*mapped);
             }
@@ -278,11 +281,11 @@ class SyntheticModuleSource final : public capture::ModuleSource {
             if (host.size() >= 64 || host.find_first_of("/\\:") != std::string::npos ||
                 host.find("..") != std::string::npos) {
                 error = "path-shaped dependency: " + original_name;
-                return nullptr;
+                return kNoModule;
             }
-            for (const auto& module : modules_) {
-                if (std::string_view(module.name.data()) == host) {
-                    return &module;
+            for (std::size_t i = 0; i < modules_.size(); ++i) {
+                if (std::string_view(modules_[i].name.data()) == host) {
+                    return i;
                 }
             }
             auto path = system_modules_dir_ / host;
@@ -290,41 +293,41 @@ class SyntheticModuleSource final : public capture::ModuleSource {
             if (!std::filesystem::exists(path, ec) || ec) {
                 if (!system_modules_fallback_ || synth_dir_.empty()) {
                     error = "missing system module: " + host;
-                    return nullptr;
+                    return kNoModule;
                 }
                 path = synth_dir_ / (host.substr(0, host.size() - 4) + ".x64.dll");
             }
             std::ifstream in(path, std::ios::binary);
             if (!in) {
                 error = "system module unreadable: " + host;
-                return nullptr;
+                return kNoModule;
             }
             const std::vector<std::uint8_t> bytes{std::istreambuf_iterator<char>(in),
                                                   std::istreambuf_iterator<char>()};
             const auto info = loader::parse_pe(bytes);
             if (!info || info->bitness != loader::kBitness64) {
                 error = "system module is not an x64 PE: " + host;
-                return nullptr;
+                return kNoModule;
             }
             auto image = loader::build_image(bytes, *info);
             if (!image) {
                 error = "system module could not be mapped: " + host;
-                return nullptr;
+                return kNoModule;
             }
             loader::LoadedModule module;
             module.image = std::move(*image);
             std::memcpy(module.name.data(), host.data(), host.size());
             if (!loader::index_exports(module)) {
                 error = "system module export table unreadable: " + host;
-                return nullptr;
+                return kNoModule;
             }
             modules_.push_back(std::move(module));
-            return &modules_.back();
+            return modules_.size() - 1;
         }
         const std::string key = capture::fold_module_name(original_name);
-        for (const auto& module : modules_) {
-            if (capture::fold_module_name(std::string_view(module.name.data())) == key) {
-                return &module;
+        for (std::size_t i = 0; i < modules_.size(); ++i) {
+            if (capture::fold_module_name(std::string_view(modules_[i].name.data())) == key) {
+                return i;
             }
         }
         std::string host{key};
@@ -342,12 +345,12 @@ class SyntheticModuleSource final : public capture::ModuleSource {
         if (!std::filesystem::exists(path, ec) || ec) {
             error = "dependency " + original_name + ": missing synthetic system module (" + stem +
                     ".x64.dll not in the trusted directory)";
-            return nullptr;
+            return kNoModule;
         }
         std::ifstream in(path, std::ios::binary);
         if (!in) {
             error = "dependency " + original_name + ": synthetic system module unreadable";
-            return nullptr;
+            return kNoModule;
         }
         std::vector<std::uint8_t> bytes{std::istreambuf_iterator<char>(in),
                                         std::istreambuf_iterator<char>()};
@@ -355,12 +358,12 @@ class SyntheticModuleSource final : public capture::ModuleSource {
         if (!info) {
             error =
                 "dependency " + original_name + ": synthetic system module is not a loadable PE";
-            return nullptr;
+            return kNoModule;
         }
         auto image = loader::build_image(bytes, *info);
         if (!image) {
             error = "dependency " + original_name + ": synthetic system module could not be mapped";
-            return nullptr;
+            return kNoModule;
         }
         loader::LoadedModule module;
         module.base = 0; // verification only: exports carry RVAs
@@ -371,10 +374,10 @@ class SyntheticModuleSource final : public capture::ModuleSource {
         if (!loader::index_exports(module).has_value()) {
             error =
                 "dependency " + original_name + ": synthetic system module export table unreadable";
-            return nullptr;
+            return kNoModule;
         }
         modules_.push_back(std::move(module));
-        return &modules_.back();
+        return modules_.size() - 1;
     }
 
     std::filesystem::path synth_dir_;
