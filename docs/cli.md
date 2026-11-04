@@ -59,7 +59,7 @@ system-source verification (a same-named file outside the system
 directory does not pass); private, path-shaped, or missing dependencies
 are rejected by name before any process exists. The non-Windows
 construction route for DLL input is not delivered yet - DLL samples
-there fail with a named construction error until that slice lands.
+there fail with a named construction error.
 
 `--system-modules <dir>` builds the resident system world strictly from the
 named directory (real DLL bytes; the boundary pair `ntdll.dll`/`win32u.dll`

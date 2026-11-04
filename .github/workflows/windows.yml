@@ -1,7 +1,7 @@
 name: windows
 
-# milestone-gated CI: run manually at a milestone close (gh workflow run),
-# or automatically on pull requests. Pushes to main stay un-billed.
+# Manual or pull-request CI (gh workflow run for an on-demand run).
+# Pushes to main stay un-billed.
 on:
   workflow_dispatch:
   pull_request:
@@ -65,6 +65,6 @@ jobs:
         # two live WOW64 captures). dll_capture_e2e replays the captured DLL
         # world: the payload's per-process entropy crashes its CRT init past
         # the OEP on runner hardware (green on the development machine; same
-        # live-capture family). All excluded until their normalization
-        # slices land (HANDOFF).
+        # live-capture family). All excluded until those normalization gaps
+        # close.
         run: ctest --preset windows-release -E "event_baseline|exception_e2e|behavior_e2e|loader_byhash_x86_e2e|capture_x86_e2e|dll_capture_e2e"

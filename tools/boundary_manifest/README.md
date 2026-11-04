@@ -1,8 +1,8 @@
 # Boundary description manifest sources
 
 One JSON file per (module, architecture) - the versioned classification
-authority the directory-mode boundary derivation consumes (design D2,
-change `real-dll-module-dir`). `tools/gen_boundary_seed.py` compiles these
+authority the directory-mode boundary derivation consumes.
+`tools/gen_boundary_seed.py` compiles these
 files into the committed `src/engine/boundary_seed.inc`; builds never read
 the JSON. Editing a JSON without regenerating the seed fails
 `boundary_seed` (the test regenerates and byte-compares).
@@ -13,7 +13,7 @@ the JSON. Editing a JSON without regenerating the seed fails
 {
   "schema": 1,
   "module": "ntdll.dll",          // folded name, with extension
-  "arch": "x64",                  // phase 1 derives x64 only ("x86" reserved)
+  "arch": "x64",                  // the format carries x64 only ("x86" reserved)
   "images": [                     // applicability: whole-file xxhash64
     {"xxhash64": "0x21efce8c9258a643",
      "note": "where these bytes come from (build, image, tool)"}
@@ -41,7 +41,7 @@ Field rules:
   one EAT index) must carry the same kind - they share one derived body.
 - `ret` (compat): the failure return value, decimal or `0x` hex. Required
   for `compat`, forbidden otherwise.
-- `out` (compat): `;`-separated OUT-parameter recipes. Reserved in phase 1
+- `out` (compat): `;`-separated OUT-parameter recipes. Reserved for now
   (empty string = none); the runtime handler contract lands with the
   compat-stub execution work.
 - `layout` (data): `size` bytes, `align` a power of two, `bytes` exactly

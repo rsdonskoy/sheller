@@ -1,0 +1,4 @@
+# kernelbase_by_name.dll
+kernel32.dll	LoadLibraryW	0
+kernel32.dll	ExitProcess	0
+kernelbase.dll	CreateFileW	0

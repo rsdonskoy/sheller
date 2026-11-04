@@ -207,7 +207,7 @@ struct StubCall {
     std::uint64_t count{};
 };
 
-// One row of the module source table (change real-dll-module-dir): where a
+// One row of the module source table: where a
 // resident system module's bytes came from. Empty on routes that never
 // build a loader world.
 struct AnalysisModuleSource {
@@ -355,9 +355,9 @@ struct AnalysisOptions {
 SHELLER_API std::expected<AnalysisArtifacts, AnalysisFailure>
 analyze(const std::filesystem::path& input, const AnalysisOptions& options);
 
-// Same analysis from memory. P1: snapshot bytes only - non-snapshot bytes
+// Same analysis from memory: snapshot bytes only - non-snapshot bytes
 // return a capture-class failure (sample bytes need a capture/loader bytes
-// entry, a later batch).
+// entry, which this entry does not provide).
 SHELLER_API std::expected<AnalysisArtifacts, AnalysisFailure>
 analyze(const std::vector<std::uint8_t>& input, const AnalysisOptions& options);
 
@@ -405,7 +405,7 @@ struct UnpackOptions {
     // Required for loader-route unpacks - the run maps them instead of the
     // host's real system DLLs; ignored on the Windows capture route.
     std::filesystem::path synthetic_module_dir;
-    // Directory-mode system modules (change real-dll-module-dir): the
+    // Directory-mode system modules: the
     // resident set comes strictly from this directory (boundary pair
     // derived, everything else real bytes); the synthetic directory serves
     // only the explicit fallback. On every host, directory-mode unpacks

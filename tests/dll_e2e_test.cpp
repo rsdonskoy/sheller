@@ -198,10 +198,9 @@ TEST(DllE2E, Xfer1StopsAtTheOepTransfer)
 
 // The captured-world replay is a pure function of (container bytes, engine,
 // options): two independent CLI processes replaying one container must write
-// byte-identical reports. This restores the pin withdrawn in the
-// dll-sample-support change's 7.3 investigation, where the per-process
-// entropy leak (adopted into the deterministic answer face by the
-// captured-world-determinism change) flapped it red across ctest rounds. Pin
+// byte-identical reports. The per-process entropy leak used to flap this red
+// across ctest rounds before it was adopted into the deterministic answer
+// face. Pin
 // discipline: no wall clock is set (a timeout-driven stop is a
 // nondeterministic abort and the engine never arms one at 0 ms), and the
 // compare runs only after the deterministic termination (terminated=1).

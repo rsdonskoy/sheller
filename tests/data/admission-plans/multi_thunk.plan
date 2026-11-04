@@ -1,0 +1,4 @@
+# multi_thunk.dll
+kernel32.dll	LoadLibraryW	0
+kernel32.dll	ExitProcess	0
+user32.dll	MessageBoxW	0

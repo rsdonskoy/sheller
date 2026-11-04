@@ -99,7 +99,7 @@ struct Header {
 
 // v1 carries the general register file only: GS_BASE is derived from the TEB
 // address on the engine side, and float/debug registers join via a version
-// bump when a slice needs them.
+// bump when the format needs them.
 struct Registers {
     std::array<std::uint64_t, kGprCount> gpr{};
     std::uint64_t rip{};

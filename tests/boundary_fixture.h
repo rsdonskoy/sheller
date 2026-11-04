@@ -1,4 +1,4 @@
-// Shared boundary-mechanism fixture (change real-dll-module-dir): the
+// Shared boundary-mechanism fixture: the
 // deterministic self-made AMD64 "directory file" the boundary tests derive
 // from and the directory-mode route tests map. Its whole-file xxhash64 is
 // pinned in tools/boundary_manifest/ntdll.x64.json - edit the builder and

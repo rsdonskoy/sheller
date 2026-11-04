@@ -1,4 +1,4 @@
-// Boundary description seed (change real-dll-module-dir, task 2.1): the
+// Boundary description seed: the
 // codegen is deterministic (same manifest in, byte-identical .inc out), the
 // committed seed stays fresh (regenerated output equals the checked-in
 // file - editing a manifest JSON without regenerating fails here), and the

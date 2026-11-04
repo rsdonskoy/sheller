@@ -18,7 +18,7 @@ struct SyscallCtx {
     std::uint64_t r9{};     // argument 4
     std::uint64_t rip{};    // interception-point address of the syscall
     std::uint64_t rsp{};
-    std::uint32_t tid{};   // thread-model reservation (M3 scheduler)
+    std::uint32_t tid{};   // thread-model reservation (scheduler)
     std::int64_t result{}; // handler writes the NTSTATUS / handler result back
 };
 

@@ -40,8 +40,8 @@ constexpr std::uint32_t kBlobSectionRva = 0x1000;
 std::vector<std::uint8_t> build_registry_blob()
 {
     // Emitted by a table-driven generator (all rip-relative
-    // displacements computed); see tools/registry blob notes in
-    // the change design. Do not hand-edit the byte table.
+    // displacements computed); see the registry-blob notes under tools/.
+    // Do not hand-edit the byte table.
     static constexpr std::uint8_t kBLOB[] = {
         0x48, 0x83, 0xEC, 0x28, 0xB9, 0x01, 0x00, 0x00, 0x80, 0x48, 0x8D, 0x15, 0xF0, 0x02, 0x00,
         0x00, 0x45, 0x33, 0xC0, 0x41, 0xB9, 0x01, 0x00, 0x00, 0x00, 0x48, 0x8D, 0x05, 0x00, 0x03,

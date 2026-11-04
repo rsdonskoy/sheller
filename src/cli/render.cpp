@@ -904,7 +904,7 @@ std::string render_events_section(const AnalysisArtifacts& artifacts, const Even
     }
     out.push_back('}');
 
-    // Module source table (change real-dll-module-dir): key always present,
+    // Module source table: key always present,
     // [] on routes that never build a loader world. One row per resident
     // system module - name plus the provenance class the loader marked.
     out += ",\"module_sources\":[";

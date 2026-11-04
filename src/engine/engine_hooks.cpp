@@ -645,7 +645,7 @@ void run_loop_probe(SyscallRunState& state, uc_engine* uc)
 
     // 2b. gate verdict: static closed-CFG scan over the ring's blocks, then
     // the probe's dynamic evidence downgrades what the bytes alone cannot
-    // see. Pure bookkeeping in this slice - every path below keeps the
+    // see. Pure bookkeeping - every path below keeps the
     // pre-gate behavior byte-identical; the ledger only decides what the
     // trace prints and what the go/no-go report counts.
     native_gate::GateVerdict verdict =

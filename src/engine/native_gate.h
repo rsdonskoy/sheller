@@ -1,8 +1,7 @@
-// Loop-candidate native-execution evaluation gate (slice 0 of the gated
-// native-execution roadmap): a closed-CFG static scan over the cycle
-// detector's hot blocks, deciding whether the bytes could ever be handed to
-// the host CPU. Admission here is bookkeeping only - the executor itself is
-// slice 1-2 and does not exist in this change.
+// Loop-candidate native-execution evaluation gate: a closed-CFG static scan
+// over the cycle detector's hot blocks, deciding whether the bytes could ever
+// be handed to the host CPU. Admission here is bookkeeping only - the
+// executor itself is not implemented.
 //
 // Soundness posture: false rejects are acceptable, false accepts are not.
 // The closure proof (closed CFG + no privileged/sensitive bytes) is what
@@ -27,13 +26,13 @@
 
 namespace sheller::engine::native_gate {
 
-// Exit-target slot budget: the slice-1-2 window executor pins loop exits
+// Exit-target slot budget: the window executor pins loop exits
 // with the four hardware debug registers DR0-3, so a loop with more than
 // four distinct fall-outs has no executor-side stop set - reject.
 inline constexpr std::size_t kMaxExitTargets = 4;
 // Scan budget per window (all blocks together). The probe window this gate
 // evaluates is the 8-slot cycle ring; 512 instructions is the shape bound
-// design.md sizes the executor for.
+// the executor is sized for.
 inline constexpr std::size_t kMaxLoopBlocks = 64;
 inline constexpr std::size_t kMaxScanInstructions = 512;
 

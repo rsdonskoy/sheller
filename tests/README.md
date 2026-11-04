@@ -1,8 +1,9 @@
 # tests/
 
 GoogleTest suites plus the synthetic samples, thunks, blobs and golden
-baselines they drive: 64 ctest tests register on a Windows host, 49 on a
-Linux host. Portable units run on every platform
+baselines they drive: 79 ctest tests register on a Windows host, 61 on a Linux
+host (both measured on the current tree; the admission differential target
+registers on both). Portable units run on every platform
 and CI job; Windows-only ones need a real capture host (real loader, real
 system DLLs, ml64/nasm toolchain). The Linux side has a local pre-push gate of
 its own, driven by two tracked scripts under `tools/` - see "Local Linux
@@ -11,24 +12,27 @@ verification gates" below.
 Two of them are the shared-library faces: `shared_api` (direct calls
 through the shared interface library) and `export_surface` (its symbol face
 reconciled against a checked-in list). Two numbers are worth keeping apart when a count is quoted. Locally the whole
-registered set runs (`ctest --preset windows-release` -> 64, Linux -> 49); CI
+registered set runs (`ctest --preset windows-release` -> 79, Linux -> 61); CI
 excludes the corpus-heavy live-capture entries, so its suite is smaller - with
 `-E "event_baseline|exception_e2e|behavior_e2e|loader_byhash_x86_e2e|capture_x86_e2e"`
-Windows runs 59, and the same exclusion on Linux leaves 48 because only
-`event_baseline` of those five registers there. Windows Debug is 64 registered /
-63 passing: the `event_baseline` Debug digest golden is stale at HEAD (a clean
+Windows runs 74 (measured on the 79-test set) and Linux runs 60 (only
+`event_baseline` of those five registers there, so the exclusion removes one).
+Registration is configuration-independent: Windows Debug registers the same 79,
+and the new portable target was not re-run in the Debug configuration. The
+Debug `event_baseline` digest golden is stale at HEAD (a clean
 `b5e3828` worktree reproduces the same drifted digests while the Debug product
 reports stay byte-identical to the Release baseline); it is recorded, not
-re-pinned by this batch. What the discipline-and-diagnostics
-work added on top of the older set is the four engine discipline gates,
-`shared_guard`, `engine_diag`, the three `engine_trace` runs of one binary,
-`concurrency`, and the POSIX-only `export_guard_injection`. What the delivery-surface
-batch added on top of that is `version_consistency` and `guest_sink_guard` (both
-platforms), the three `SyscallRunGuestSink` cases inside `syscall_e2e` (Windows), and
-the installed-prefix consumer under `tests/install-consumer/`, which is deliberately
-**not** a ctest entry - see "Installed-surface checks" below. The esp-law batch
-added the portable `esp_target` suite and the `--stop` faces inside the two CLI
-suites.
+re-pinned here. The engine discipline gates, `shared_guard`, `engine_diag`, the
+three `engine_trace` runs of one binary, `concurrency` and the POSIX-only
+`export_guard_injection` cover the diagnostics-and-discipline side.
+`version_consistency` and `guest_sink_guard` (both platforms), the three
+`SyscallRunGuestSink` cases inside `syscall_e2e` (Windows), and the installed-prefix
+consumer under `tests/install-consumer/` cover the delivery surface; the consumer is
+deliberately **not** a ctest entry - see "Installed-surface checks" below. The
+portable `esp_target` suite and the `--stop` faces inside the two CLI suites cover
+the esp stop target. The portable `admission_diff` suite (both platforms) compares the two
+admission routes' plans directly, and the plan text is frozen in
+`tests/data/admission-plans/`.
 
 ## The two link routes, and which suites sit on which
 
@@ -82,10 +86,13 @@ for reading these files: the six product names (`analyze` x2, `unpack_sample`,
 | `registry_intercept_e2e_test` | `registry_intercept_e2e` | engine registry interception over the loader route (advapi32 semantics) |
 | `mem_region_map_test` | `mem_region_map` | PE32+ section-table parse (+ SizeOfImage legality) + three-tier attribution queries (hierarchical adjudication: section refinement beats protection-split region fragments); runtime evolution (`register_region`, page-granular `apply_protection` carve with origin/flag inheritance), region classification pure function, stable interval identity keys under split/re-sort; module ownership truth table (overlap / adjacency / orphan) + xfer territory and edge truth tables; unknown-image group synthesis (instoll-shape 8-region chain, chain ordering/no-overlap/capacity self-clamp/determinism) |
 | `native_gate_test` | `native_gate` | loop-native gate: Zydis closed-CFG classification over fixture bytes (accept/reject classes, self-write, exit targets, malformed-stream soundness) + verdict-slot ABI |
-| `syscall_number_map_test` | `syscall_number_map` | ntdll export enumeration + stub-immediate decode; semantic policy dispatch |
+| `syscall_number_map_test` | `syscall_number_map` | ntdll export enumeration + stub-immediate decode; semantic policy dispatch (the synthetic ntdll image builder lives in `fake_ntdll.hpp`, shared with `run_facts`) |
 | `write_ledger_test` | `write_ledger` | page-dirty write ledger (`on_write`, runtime `add_region`) + original-bytes dump export and manifest |
+| `run_facts_test` | `run_facts` | the read-only run-facts layer the run-state assembly consumes: the PEB-derived current directory on the happy path (Windows-only, because the captured separator is a backslash; it also exercises the appended-separator branch) plus its degradation cells (no PEB, null ProcessParameters, odd UNICODE_STRING length, unreadable path buffer, non-absolute path, not a directory - each keeps the guest's own base), the sample module's region-map record on a hit (known/index/SizeOfImage) and its no-match cell, the syscall number <-> name tables over the shared fake ntdll (both directions built together, a non-Nt export in neither), and the assembly-stage failure's raw `uc_err` on a crafted v1 container whose entry address is unmapped - pinned to `UC_ERR_WRITE_UNMAPPED` with every statistic still zero (the entry-byte restore is the first write, so it fails before any state or hook exists; the assertion was proven red against the old zero placeholder) |
+| `run_plan_test` | `run_plan` | the run plan's pure decision core over hand-built guests with a null unicorn: alias rows sharing one VA collapse to one stub slot with the first whitelist name, an intercept supersedes a boundary trap on the same VA, directory mode counts only the explicit whitelist while the synthetic mode counts every non-intercepted export, heap/Ldr family names match through `fold_name`, an already-registered VA is never appended twice, the intercept VA's module index resolves inside the module span and falls back to the `0xFFFF` sentinel outside, and the per-mode trampoline/allocator cursors sit on the layout constants with no overlap against the heap, stack and environment ranges (each assertion was mutation-proven red) |
 | `behavior_rules_test` | `behavior_rules` | judgment-event emission over synthetic fact sequences: every rule pattern, one event per hit (no dedupe, no capacity cap), the rule fields carried on the wire |
 | `wrapper_test` | `wrapper` | minimal-PE blob construction for bare shellcode |
+| `admission_diff_test` | `admission_diff` | the two runner-admission routes are one algorithm. The plan-equality case drives the Windows capture admission (`capture::admit_dll_sample`) and the synthetic construction admission (`engine::admit_synth_dll_sample`) over the same seven-sample real-export corpus and asserts the plans are equal (`RunnerPlan::operator==`; Windows-gated - the capture route needs real system DLLs). The corpus covers by-name and by-ordinal references, a multi-module BFS (one plan entry per direct module in import order), the per-module symbol walk (a missing first symbol, the next one selected) and the first-spelling rule for a module referenced under two spellings. The golden case serializes each plan to the module / symbol / ordinal text frozen in `tests/data/admission-plans/*.plan` under the sample's arrival name, and checks it through the synthetic route on **every** platform (Linux CI's admission coverage) plus the capture route on Windows. The rejection case asserts both routes refuse the same rejection corpus (path-shaped dependency name, missing export, arrival-name collision, unverifiable module), naming the dependency and (per route) its reason, without comparing the two routes' deliberately different wording - the synthetic half also runs on every platform. The fixtures are hand-built x64 PEs with an arbitrary import table, generated in-test. The over-capacity rejection is not reachable from sample bytes - `parse_imports` bounds a sample at 64 module descriptors, so a plan carries at most 66 imports against the 96-entry runner capacity - so the capacity guard has no corpus and the test does not pretend otherwise. The module-name fold (`fold_module_name` / `fold_module_name_equals`) is pinned here too: ASCII-only case folding, non-ASCII bytes pass through, and equal-length comparison |
 | `syscall_bench` | `syscall_bench` | micro-benchmark + red-line gate: syscall chain <= 10 us/call, bare hook cost |
 | `det_helper` | - (no ctest entry; driven by `dll_capture_e2e`) | resident determinism helper: one replay per invocation over a given container - raw event stream (`[type][seq][pc][payload]` records) to disk through the facade's host observer, exit dump, repair into a `.unp`; no budget and no wall clock, terminated in its stats line only |
 | `event_baseline_test` | `event_baseline` | relocation-normalized event-stream baselines vs goldens: the production event stream (rules + forwarding + one cursor) over the Windows sample set; address-bearing forwarded/judgment payload fields are normalized, the type/order/pc pins remain |
@@ -385,8 +392,8 @@ died without anyone noticing (see the mirror bullet).
 
 | script | preset | shape |
 |---|---|---|
-| `tools/run_linux_suite.sh` | `linux-debug` | lock, mount, mirror, chown, configure, build, the whole registered set (49 tests), then the installed-consumer leg |
-| `tools/run_linux_sanitizer.sh` | `linux-sanitizer` | the same stages, no install leg, and the CI's four-name `-E` exclusion (47 of 49) |
+| `tools/run_linux_suite.sh` | `linux-debug` | lock, mount, mirror, chown, configure, build, the whole registered set (61 tests), then the installed-consumer leg |
+| `tools/run_linux_sanitizer.sh` | `linux-sanitizer` | the same stages, no install leg, and the CI's four-name `-E` exclusion (59 of 61: `export_surface` is skipped on this preset and only `event_baseline` of the four exclusion names registers) |
 
 Both drive WSL as root, because they mount the dev drive and chown the mirror
 target. Copy-paste invocation:
@@ -411,11 +418,11 @@ Four properties the two scripts exist to keep:
   wipes at its own start (`tests/install-consumer/run.cmake:60`), and the fixed `/tmp`
   stage logs. Without it, an injection round interleaved with a leg produces the worst
   possible artifact - the injected mirror has no `cmake/`, so the leg dies naming
-  `configure` and looks exactly like the 19324d3 defect this batch was written to end.
-  Measured rather than assumed (probe: `build/linux-gate-durability/probe_flock2.sh`): a
-  second script is refused at its own lock stage with exit 1, and the lock is free again
-  once the holder exits, so there is no stale-lock state to clean - which is what made
-  this worth adding instead of documenting. The lock file is never unlinked: flock locks
+  `configure` and looks exactly like the 19324d3 defect this gate exists to catch.
+  Measured rather than assumed: a second script is refused at its own lock stage with
+  exit 1, and the lock is free again once the holder exits, so there is no stale-lock
+  state to clean - which is what made this worth adding instead of documenting. The lock
+  file is never unlinked: flock locks
   an open file description, so deleting it lets a new run open a different inode and
   proceed alongside a holder that still locks the old one. One gap is left on purpose:
   `build/wsl_linux.sh` is the developer loop and is not tracked, so it runs outside the
@@ -511,8 +518,7 @@ the exact fake green this section is about.
 `/home/user1/sheller-linux`, the `user1` account, `/home/user1/vcpkg`, `gcc-13`
 and the drvfs mount point are written into the scripts: the gates make one
 machine's environment explicit instead of implicit. Rebuilding it is recorded in
-the local handoff note (`.docs/HANDOFF.md`, untracked by the same ignore rule
-that hid the old scripts), not duplicated here.
+a local handoff note, not duplicated here.
 
 Measured 2026-10-22 against one mirror (16 MB of source after the excludes):
 `linux-debug` 48/48 (100.08 s of tests) plus the install leg, `linux-sanitizer`
@@ -594,6 +600,16 @@ Measured 2026-10-22 against one mirror (16 MB of source after the excludes):
   between /Od and /O2 links). Regenerate per tree via
   `SHELLER_REGEN_EVENT_BASELINE`.
 
+`data/admission-plans/*.plan` is the admission counterpart: one file per
+differential-corpus sample (`packed`, `kernel32_by_name`, `user32_by_name`,
+`ntdll_by_ordinal`, `kernelbase_by_name`, `multi_module`, `multi_thunk`), each
+a `# <arrival name>` header and one `module<TAB>symbol<TAB>ordinal` row per plan
+import in generation order.
+`admission_diff` compares the synthetic route's text against it on every
+platform and the capture route's text on Windows. Regenerate with
+`SHELLER_ADMISSION_PLAN_WRITE=1` when the corpus or the shared selection rule
+changes; the files are ordinary check-in artifacts, not binary goldens.
+
 ## Corpus
 
 `packed.exe` - UPX-packed x64 sample kept as the dump-engine and
@@ -602,7 +618,7 @@ sample. `packed.exe.unp` is its repaired ground truth (the `iat_repair` /
 `unpack_cli` acceptance compares against it). Real family samples stay out
 of the repository by policy.
 
-## DLL corpus (dll-sample-support)
+## DLL corpus
 
 `tests/packed.dll` (UPX-packed x64 DLL) and `tests/packed.dll.unp` (the
 `upx -d` reference) drive the DLL-input route: `capture` spawns a generated
@@ -629,15 +645,21 @@ plus the artifact-chain pin
 `det_helper` target serializes the complete raw event stream, the exit
 dump and the repaired `.unp` per process, and the test byte-compares the
 three groups across two helper processes over one container) - all
-WIN32-gated. `dll_capture_e2e` stays excluded from shared CI runners: the
+WIN32-gated. The admission algorithm those routes share is pinned from the
+other side by `admission_diff` (see the portable table above): the plan-equality
+case compares the capture route's plan with the synthetic route's plan, and the
+golden case freezes both in `tests/data/admission-plans/*.plan`, so a fix to one
+route that forgets the other fails by name instead of silently splitting the
+corpus.
+`dll_capture_e2e` stays excluded from shared CI runners: the
 old runner-hardware crash past the OEP was steered by the captured world's
 per-process entropy (the virtual-TSC answer leaked host stack into its high
-bits through a narrow register write), which the captured-world-determinism
-change fixed - the replay is now cross-process byte-identical on the
-development machine - but the fixed trajectory itself has not been
+bits through a narrow register write), which is fixed - the replay is now
+cross-process byte-identical on the development machine - but the fixed
+trajectory itself has not been
 exercised on shared runner hardware, so the suite waits there.
 
-### Real-DLL directory corpus (real-dll-module-dir, env-gated)
+### Real-DLL directory corpus (env-gated)
 
 `loader_directory_test` grows one opt-in test behind an environment variable -
 it drives real Windows DLLs you supply locally and never runs in CI:

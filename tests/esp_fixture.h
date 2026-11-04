@@ -1,4 +1,4 @@
-// Crafted esp-stop fixtures (change esp-law-oep): the same craft shape as
+// Crafted esp-stop fixtures: the same craft shape as
 // snapshot_fixture.h, with entry code that saves registers on the stack and
 // restores them, so the esp stop target's window, confirmation set and both
 // stop forms have a deterministic corpus. Addresses are the fixture's

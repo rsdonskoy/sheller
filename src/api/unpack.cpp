@@ -188,7 +188,7 @@ UnpackOutcome unpack_sample_impl(const std::filesystem::path& sample, const Unpa
             outcome.failure->capture_status = *capture_status;
         }
         // A generated staging directory does not outlive a failed call -
-        // batch hosts fail constantly and a leaked directory per failure
+        // Hosts fail constantly and a leaked directory per failure
         // grows without bound; hosts that want the dump for diagnostics pass
         // an explicit work_dir (never touched by cleanup).
         if (self_created) {

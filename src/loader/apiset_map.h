@@ -1,7 +1,6 @@
-// The directory-delivered API Set map (design D5, change
-// real-dll-module-dir): a versioned binary the user's system-module
-// directory carries alongside its raw ntdll, generated offline from a
-// reviewed text source. The reader is bounded over untrusted bytes and
+// The directory-delivered API Set map: a versioned binary the user's
+// system-module directory carries alongside its raw ntdll, generated offline
+// from a reviewed text source. The reader is bounded over untrusted bytes and
 // binds the map to exactly one (architecture, whole-file ntdll xxhash64)
 // anchor - the unique applicability anchor, never a guess across several
 // module hashes. Pure bytes: no unicorn, no filesystem.
@@ -38,8 +37,8 @@ struct ApiSetMapFailure {
     std::string detail;
 };
 
-// The architecture byte the format carries today. Phase 1 ships x64 maps
-// only; the byte exists so a mismatch names itself.
+// The architecture byte the format carries today: x64 maps only; the byte
+// exists so a mismatch names itself.
 inline constexpr std::uint8_t kApiSetMapArchX64 = 1;
 
 // Loaded map view: validated once, queried per resolution. Copies the pool

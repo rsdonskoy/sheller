@@ -1,5 +1,5 @@
 // Resident cross-process determinism helper (the artifact-chain pin's
-// worker, change captured-world-determinism task 3.2). One replay per
+// worker). One replay per
 // invocation: load the container given on argv, serialize the complete raw
 // event stream through the facade's host observer (wire-encoded records
 // carrying the full preamble: type, seq, tid, pc, payload), run with an

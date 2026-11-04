@@ -9,10 +9,9 @@
 # is reported in the summary so the table gets tightened - a registry that drifts
 # above reality stops guarding the line where a new .at() would be caught.
 #
-# The classification behind each baseline number lives in
-# openspec/changes/embedder-hardening/audit-at-sites.md (guest-controlled /
-# internal invariant / constant lookup, with the evidence per site). New .at() in
-# a file needs a decision recorded there first, not a bigger number here.
+# The classification behind each baseline number is guest-controlled /
+# internal invariant / constant lookup, with the evidence per site. A new .at()
+# in a file needs that classification decided first, not a bigger number here.
 #
 # INVOCATION (a ctest command, see tests/CMakeLists.txt):
 #   -DGATE_ROOT=<project source dir>

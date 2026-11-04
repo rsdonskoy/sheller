@@ -15,9 +15,11 @@
 // names the dependency.
 
 #include "../../engine/craft.h"
+#include "../../engine/craft_admission.h"
 #include "../../engine/loader_route.h"
 
 #include "../../loader/imports.h"
+#include "../capture/admission.h"
 #include "../capture/pe_headers.h"
 #include "../capture/wrapper.h"
 
@@ -28,6 +30,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
+#include <deque>
 #include <expected>
 #include <filesystem>
 #include <fstream>
@@ -38,6 +41,7 @@
 #include <sstream>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 #include <xxhash.h>
@@ -49,16 +53,6 @@ bool all_zero(const std::vector<std::uint8_t>& bytes)
 {
     return std::all_of(bytes.begin(), bytes.end(),
                        [](const std::uint8_t byte) { return byte == 0; });
-}
-
-std::string folded(std::string_view name)
-{
-    std::string out;
-    out.reserve(name.size());
-    for (const char c : name) {
-        out.push_back(static_cast<char>(std::tolower(static_cast<unsigned char>(c))));
-    }
-    return out;
 }
 
 // Export-directory facts of a MAPPED image (RVAs index the buffer directly -
@@ -123,131 +117,222 @@ bool ordinal_exported(const loader::LoadedModule& module, const std::uint16_t or
     return !(function_rva >= facts.rva && function_rva < facts.rva + facts.size);
 }
 
-// The non-Windows admission: the synthetic module directory is
-// the trusted system world. Same runner plan shape as the Windows admission
-// (base pair first, then one verified symbol per direct dependency, in the
-// sample's own import order) so the same corpus produces the same runner
-// bytes on both platforms. Synth modules import nothing and forward nothing
-// by construction, so the closure is the direct import set plus kernel32 -
-// but every name still resolves through the API-set host rules.
-std::expected<capture::RunnerPlan, std::string>
-admit_synth_dll_sample(const std::vector<std::uint8_t>& sample_bytes,
-                       const std::string& arrival_name, const std::filesystem::path& synth_dir,
-                       const std::filesystem::path& system_modules_dir = {},
-                       const bool system_modules_fallback = false)
-{
-    // The arrival name becomes the runner's path string and the emulated
-    // Ldr entry's BaseDllName (bounded to 64 chars there) - enforce one
-    // bound at the source, matching the Windows admission exactly.
-    if (arrival_name.empty() || arrival_name.size() > 64 ||
-        !std::all_of(arrival_name.begin(), arrival_name.end(),
-                     [](const unsigned char c) { return c >= 0x20 && c < 0x7F && c != '\\'; })) {
-        return std::unexpected("sample file name: empty, non-ASCII, or over 64 characters");
-    }
-    std::vector<capture::PeImportThunk> imports;
-    if (const auto error =
-            capture::parse_imports(sample_bytes.data(), sample_bytes.size(), imports);
-        error != capture::PeError::kNone) {
-        return std::unexpected(std::string(capture::pe_error_message(error)));
+class SyntheticModuleSource;
+
+// One synthetic-world module, borrowed for the current dependency. The view
+// stores the module's index, never a pointer into the source's module store:
+// directory-mode forwarder resolution may append modules while the view is in
+// use, and a vector element address is not stable across that growth.
+class SyntheticModuleView final : public capture::ModuleView {
+  public:
+    SyntheticModuleView(SyntheticModuleSource* source, std::string spelled, std::string key,
+                        const std::size_t index)
+        : source_(source), spelled_(std::move(spelled)), key_(std::move(key)), index_(index)
+    {
+        name = spelled_;
     }
 
-    capture::RunnerPlan plan;
-    plan.arch = capture::WrapArch::kX64;
-    plan.arrival_name = arrival_name;
-    plan.imports.push_back({"kernel32.dll", "LoadLibraryW", 0});
-    plan.imports.push_back({"kernel32.dll", "ExitProcess", 0});
+    SyntheticModuleView(const SyntheticModuleView&) = delete;
+    SyntheticModuleView& operator=(const SyntheticModuleView&) = delete;
+    SyntheticModuleView(SyntheticModuleView&&) = delete;
+    SyntheticModuleView& operator=(SyntheticModuleView&&) = delete;
 
-    // On-demand frozen-module store: every name that enters verification is
-    // loaded once (mapped image + name-sorted export index). resolve_export
-    // walks its forwarder chains across exactly this set.
-    std::vector<loader::LoadedModule> modules;
-    // Directory mode: every dependency resolves against the directory's own
-    // DLL bytes (real export tables, forwarder chains walked) - the same
-    // admission shape as the Windows capture route. The boundary pair and
-    // applicability re-verify at world construction; admission only proves
-    // symbol presence.
-    const bool directory_mode = !system_modules_dir.empty();
-    loader::ApiSetMapView directory_map;
-    loader::ApiSetContext ctx;
-    if (directory_mode) {
-        const auto read = [](const std::filesystem::path& path) {
-            std::ifstream in(path, std::ios::binary);
-            return std::vector<std::uint8_t>{std::istreambuf_iterator<char>(in),
-                                             std::istreambuf_iterator<char>()};
-        };
-        const auto ntdll = read(system_modules_dir / "ntdll.dll");
-        const auto bytes = read(system_modules_dir / "apiset-map.bin");
-        auto map = loader::ApiSetMapView::load(bytes, loader::kApiSetMapArchX64,
-                                               XXH64(ntdll.data(), ntdll.size(), 0));
-        if (!map) {
-            return std::unexpected("apiset-map.bin: " + map.error().detail);
+    std::expected<capture::ModuleView::Hit, std::string> resolves(std::string_view symbol,
+                                                                  std::uint16_t ordinal) override;
+
+  private:
+    SyntheticModuleSource* source_;
+    std::string spelled_;
+    std::string key_;
+    std::size_t index_;
+};
+
+// The synthetic route's module source: the frozen module directory is the
+// trusted world. Directory mode reads real DLL bytes and walks forwarder
+// chains through the API Set map; the generated-module mode maps an
+// api-set-prefix host to <module>.x64.dll. The closure is direct imports only -
+// asking the frozen set's own imports would only circle an already-trusted
+// set - so walk_full_closure() stays false.
+class SyntheticModuleSource final : public capture::ModuleSource {
+  public:
+    SyntheticModuleSource(std::filesystem::path synth_dir, std::filesystem::path system_modules_dir,
+                          const bool system_modules_fallback, std::string arrival_name)
+        : synth_dir_(std::move(synth_dir)), system_modules_dir_(std::move(system_modules_dir)),
+          system_modules_fallback_(system_modules_fallback), arrival_name_(std::move(arrival_name)),
+          directory_mode_(!system_modules_dir_.empty())
+    {
+    }
+
+    std::expected<void, std::string> prepare() override
+    {
+        if (directory_mode_) {
+            const auto read = [](const std::filesystem::path& path) {
+                std::ifstream in(path, std::ios::binary);
+                return std::vector<std::uint8_t>{std::istreambuf_iterator<char>(in),
+                                                 std::istreambuf_iterator<char>()};
+            };
+            const auto ntdll = read(system_modules_dir_ / "ntdll.dll");
+            const auto bytes = read(system_modules_dir_ / "apiset-map.bin");
+            auto map = loader::ApiSetMapView::load(bytes, loader::kApiSetMapArchX64,
+                                                   XXH64(ntdll.data(), ntdll.size(), 0));
+            if (!map) {
+                return std::unexpected("apiset-map.bin: " + map.error().detail);
+            }
+            directory_map_ = std::move(*map);
+            ctx_.mode = loader::ApiSetContext::Mode::kDirectoryMap;
+            ctx_.directory_map = &directory_map_;
         }
-        directory_map = std::move(*map);
-        ctx.mode = loader::ApiSetContext::Mode::kDirectoryMap;
-        ctx.directory_map = &directory_map;
+        // The base pair's host must exist even though it contributes no runner
+        // import: a world without kernel32 cannot answer the stub's calls.
+        std::string error;
+        if (load_module("kernel32.dll", error) == kNoModule) {
+            return std::unexpected(std::move(error));
+        }
+        return {};
     }
 
-    const auto load_synth_module = [&](const std::string& original_name)
-        -> std::expected<const loader::LoadedModule*, std::string> {
-        if (directory_mode) {
-            auto host = folded(original_name);
+    capture::ModuleView* acquire(const std::string_view spelled, const std::string_view folded,
+                                 std::string& error) override
+    {
+        const std::size_t index = load_module(std::string{folded}, error);
+        if (index == kNoModule) {
+            return nullptr;
+        }
+        views_.emplace_back(this, std::string{spelled}, std::string{folded}, index);
+        return &views_.back();
+    }
+
+    // The view's resolution behavior, in one place per world mode.
+    std::expected<capture::ModuleView::Hit, std::string> resolve(const std::string& key,
+                                                                 const std::size_t index,
+                                                                 const std::string_view symbol,
+                                                                 const std::uint16_t ordinal)
+    {
+        capture::ModuleView::Hit hit;
+        if (directory_mode_) {
+            // Retry only a missing chain endpoint. Each retry must grow the
+            // module set; cycles and missing symbols fail closed.
+            for (std::size_t hop = 0; hop < 8; ++hop) {
+                const auto resolved =
+                    symbol.empty()
+                        ? loader::resolve_ordinal_export(modules_, key, ordinal, ctx_,
+                                                         arrival_name_)
+                        : loader::resolve_export(modules_, key, symbol, ctx_, arrival_name_);
+                if (resolved.ok) {
+                    hit.exported = true;
+                    return hit;
+                }
+                if (resolved.unmapped_api_set || resolved.missing_module.empty()) {
+                    break;
+                }
+                const auto count = modules_.size();
+                std::string load_error;
+                if (load_module(resolved.missing_module, load_error) == kNoModule) {
+                    return std::unexpected(std::move(load_error));
+                }
+                if (modules_.size() == count) {
+                    break;
+                }
+            }
+            return hit;
+        }
+        hit.exported = symbol.empty() ? ordinal_exported(modules_[index], ordinal)
+                                      : loader::resolve_export(modules_, key, symbol).ok;
+        return hit;
+    }
+
+    std::string dependency_error(const std::string_view spelled,
+                                 const capture::AdmissionProblem problem) const override
+    {
+        switch (problem) {
+        case capture::AdmissionProblem::kCollisionWithSample:
+            return "dependency " + std::string{spelled} +
+                   ": name collides with the sample arrival name";
+        case capture::AdmissionProblem::kPathShapedName:
+            return "dependency " + std::string{spelled} + ": path-shaped import name";
+        case capture::AdmissionProblem::kNoImportableExport:
+            return "dependency " + std::string{spelled} +
+                   ": no verifiable export for the referenced symbols";
+        }
+        return "dependency " + std::string{spelled} + ": unverifiable dependency";
+    }
+
+  private:
+    static constexpr std::size_t kNoModule = static_cast<std::size_t>(-1);
+
+    // Loads a module into the store (or finds it there) and returns its index,
+    // never a pointer: the store grows on directory-mode forwarder retries, and
+    // a vector element address is not stable across that growth.
+    // `original_name` is the folded lookup key; error text is the synthetic
+    // route's own wording, in the store's folded spelling.
+    std::size_t load_module(const std::string& original_name, std::string& error)
+    {
+        if (directory_mode_) {
+            auto host = capture::fold_module_name(original_name);
             if (host.starts_with("api-ms-") || host.starts_with("ext-ms-")) {
                 if (host.ends_with(".dll")) {
                     host.resize(host.size() - 4);
                 }
-                const auto mapped = directory_map.host_for(host, arrival_name);
+                const auto mapped = directory_map_.host_for(host, arrival_name_);
                 if (!mapped) {
-                    return std::unexpected("api set not mapped: " + original_name);
+                    error = "api set not mapped: " + original_name;
+                    return kNoModule;
                 }
-                host = folded(*mapped);
+                host = capture::fold_module_name(*mapped);
             }
             if (!host.ends_with(".dll")) {
                 host += ".dll";
             }
             if (host.size() >= 64 || host.find_first_of("/\\:") != std::string::npos ||
                 host.find("..") != std::string::npos) {
-                return std::unexpected("path-shaped dependency: " + original_name);
+                error = "path-shaped dependency: " + original_name;
+                return kNoModule;
             }
-            for (const auto& module : modules) {
-                if (std::string_view(module.name.data()) == host) {
-                    return &module;
+            for (std::size_t i = 0; i < modules_.size(); ++i) {
+                if (std::string_view(modules_[i].name.data()) == host) {
+                    return i;
                 }
             }
-            auto path = system_modules_dir / host;
+            auto path = system_modules_dir_ / host;
             std::error_code ec;
             if (!std::filesystem::exists(path, ec) || ec) {
-                if (!system_modules_fallback || synth_dir.empty()) {
-                    return std::unexpected("missing system module: " + host);
+                if (!system_modules_fallback_ || synth_dir_.empty()) {
+                    error = "missing system module: " + host;
+                    return kNoModule;
                 }
-                path = synth_dir / (host.substr(0, host.size() - 4) + ".x64.dll");
+                path = synth_dir_ / (host.substr(0, host.size() - 4) + ".x64.dll");
             }
             std::ifstream in(path, std::ios::binary);
             if (!in) {
-                return std::unexpected("system module unreadable: " + host);
+                error = "system module unreadable: " + host;
+                return kNoModule;
             }
             const std::vector<std::uint8_t> bytes{std::istreambuf_iterator<char>(in),
                                                   std::istreambuf_iterator<char>()};
             const auto info = loader::parse_pe(bytes);
             if (!info || info->bitness != loader::kBitness64) {
-                return std::unexpected("system module is not an x64 PE: " + host);
+                error = "system module is not an x64 PE: " + host;
+                return kNoModule;
             }
             auto image = loader::build_image(bytes, *info);
             if (!image) {
-                return std::unexpected("system module could not be mapped: " + host);
+                error = "system module could not be mapped: " + host;
+                return kNoModule;
             }
             loader::LoadedModule module;
             module.image = std::move(*image);
             std::memcpy(module.name.data(), host.data(), host.size());
             if (!loader::index_exports(module)) {
-                return std::unexpected("system module export table unreadable: " + host);
+                error = "system module export table unreadable: " + host;
+                return kNoModule;
             }
-            modules.push_back(std::move(module));
-            return &modules.back();
+            modules_.push_back(std::move(module));
+            return modules_.size() - 1;
         }
-        const std::string key = folded(original_name);
-        for (const auto& module : modules) {
-            if (folded(std::string_view(module.name.data())) == key) {
-                return &module;
+        const std::string key = capture::fold_module_name(original_name);
+        for (std::size_t i = 0; i < modules_.size(); ++i) {
+            if (capture::fold_module_name(std::string_view(modules_[i].name.data())) == key) {
+                return i;
             }
         }
         std::string host{key};
@@ -260,29 +345,30 @@ admit_synth_dll_sample(const std::vector<std::uint8_t>& sample_bytes,
             stem.compare(stem.size() - kDllSuffix.size(), kDllSuffix.size(), kDllSuffix) == 0) {
             stem.resize(stem.size() - kDllSuffix.size());
         }
-        const auto path = synth_dir / (stem + ".x64.dll");
+        const auto path = synth_dir_ / (stem + ".x64.dll");
         std::error_code ec;
         if (!std::filesystem::exists(path, ec) || ec) {
-            return std::unexpected("dependency " + original_name +
-                                   ": missing synthetic system module (" + stem +
-                                   ".x64.dll not in the trusted directory)");
+            error = "dependency " + original_name + ": missing synthetic system module (" + stem +
+                    ".x64.dll not in the trusted directory)";
+            return kNoModule;
         }
         std::ifstream in(path, std::ios::binary);
         if (!in) {
-            return std::unexpected("dependency " + original_name +
-                                   ": synthetic system module unreadable");
+            error = "dependency " + original_name + ": synthetic system module unreadable";
+            return kNoModule;
         }
         std::vector<std::uint8_t> bytes{std::istreambuf_iterator<char>(in),
                                         std::istreambuf_iterator<char>()};
         const auto info = loader::parse_pe(bytes);
         if (!info) {
-            return std::unexpected("dependency " + original_name +
-                                   ": synthetic system module is not a loadable PE");
+            error =
+                "dependency " + original_name + ": synthetic system module is not a loadable PE";
+            return kNoModule;
         }
         auto image = loader::build_image(bytes, *info);
         if (!image) {
-            return std::unexpected("dependency " + original_name +
-                                   ": synthetic system module could not be mapped");
+            error = "dependency " + original_name + ": synthetic system module could not be mapped";
+            return kNoModule;
         }
         loader::LoadedModule module;
         module.base = 0; // verification only: exports carry RVAs
@@ -291,109 +377,54 @@ admit_synth_dll_sample(const std::vector<std::uint8_t>& sample_bytes,
             host.size() < module.name.size() - 1 ? host.size() : module.name.size() - 1;
         std::memcpy(module.name.data(), host.data(), name_bytes);
         if (!loader::index_exports(module).has_value()) {
-            return std::unexpected("dependency " + original_name +
-                                   ": synthetic system module export table unreadable");
+            error =
+                "dependency " + original_name + ": synthetic system module export table unreadable";
+            return kNoModule;
         }
-        modules.push_back(std::move(module));
-        return &modules.back();
-    };
-
-    // The base pair's host must exist even though it contributes no runner
-    // import: a world without kernel32 cannot answer the stub's calls.
-    if (const auto kernel32 = load_synth_module("kernel32.dll"); !kernel32.has_value()) {
-        return std::unexpected(kernel32.error());
+        modules_.push_back(std::move(module));
+        return modules_.size() - 1;
     }
 
-    std::set<std::string> processed{folded("kernel32.dll")};
-    std::size_t cursor = 0;
-    // (folded key, original spelling) - errors name the dependency the way
-    // the sample spelled it, not the folded lookup key.
-    std::vector<std::pair<std::string, std::string>> queue;
-    for (const auto& import : imports) {
-        const std::string key = folded(import.module);
-        if (std::none_of(queue.begin(), queue.end(),
-                         [&](const std::pair<std::string, std::string>& pending) {
-                             return pending.first == key;
-                         })) {
-            queue.push_back({key, import.module});
-        }
-    }
-    while (cursor < queue.size()) {
-        const auto [key, spelled] = queue[cursor++];
-        if (key == folded(arrival_name)) {
-            return std::unexpected("dependency " + spelled +
-                                   ": name collides with the sample arrival name");
-        }
-        if (processed.count(key) != 0) {
-            continue;
-        }
-        processed.insert(key);
-        if (key.empty() || key.find('\\') != std::string::npos ||
-            key.find('/') != std::string::npos || key.find(':') != std::string::npos ||
-            key.find("..") != std::string::npos) {
-            return std::unexpected("dependency " + spelled + ": path-shaped import name");
-        }
-        const auto loaded_module = load_synth_module(key);
-        if (!loaded_module.has_value()) {
-            return std::unexpected(loaded_module.error());
-        }
+    std::filesystem::path synth_dir_;
+    std::filesystem::path system_modules_dir_;
+    bool system_modules_fallback_;
+    std::string arrival_name_;
+    bool directory_mode_;
+    loader::ApiSetMapView directory_map_;
+    loader::ApiSetContext ctx_;
+    std::vector<loader::LoadedModule> modules_;
+    std::deque<SyntheticModuleView> views_;
+};
 
-        // Pick the first referenced symbol that verifies against the frozen
-        // module, in the sample's own import order (the Windows admission's
-        // selection rule, so one corpus yields one plan everywhere).
-        bool selected = false;
-        for (const auto& import : imports) {
-            if (folded(import.module) != key) {
-                continue;
-            }
-            bool ok = false;
-            if (directory_mode) {
-                // Retry only a missing chain endpoint. Each retry must grow
-                // the module set; cycles and missing symbols fail closed.
-                for (std::size_t hop = 0; hop < 8; ++hop) {
-                    const auto resolved =
-                        import.name.empty()
-                            ? loader::resolve_ordinal_export(modules, key, import.ordinal, ctx,
-                                                             arrival_name)
-                            : loader::resolve_export(modules, key, import.name, ctx, arrival_name);
-                    if (resolved.ok) {
-                        ok = true;
-                        break;
-                    }
-                    if (resolved.unmapped_api_set || resolved.missing_module.empty()) {
-                        break;
-                    }
-                    const auto count = modules.size();
-                    const auto next = load_synth_module(resolved.missing_module);
-                    if (!next) {
-                        return std::unexpected(next.error());
-                    }
-                    if (modules.size() == count) {
-                        break;
-                    }
-                }
-            } else {
-                const auto& loaded = **loaded_module;
-                ok = import.name.empty() ? ordinal_exported(loaded, import.ordinal)
-                                         : loader::resolve_export(modules, key, import.name).ok;
-            }
-            if (!ok) {
-                continue;
-            }
-            plan.imports.push_back({import.module, import.name, import.ordinal});
-            if (plan.imports.size() > capture::kMaxRunnerImports) {
-                return std::unexpected("dependency closure exceeds the runner capacity");
-            }
-            selected = true;
-            break;
-        }
-        if (!selected) {
-            return std::unexpected("dependency " + spelled +
-                                   ": no verifiable export for the referenced symbols");
-        }
-    }
-    return plan;
+std::expected<capture::ModuleView::Hit, std::string>
+SyntheticModuleView::resolves(const std::string_view symbol, const std::uint16_t ordinal)
+{
+    return source_->resolve(key_, index_, symbol, ordinal);
 }
+
+} // namespace
+
+// The non-Windows admission: the synthetic module directory is
+// the trusted system world. Same runner plan shape as the Windows admission
+// (base pair first, then one verified symbol per direct dependency, in the
+// sample's own import order) so the same corpus produces the same runner
+// bytes on both platforms. Synth modules import nothing and forward nothing
+// by construction, so the closure is the direct import set plus kernel32 -
+// but every name still resolves through the API-set host rules.
+// Public only so the differential test can drive both routes; the container
+// construction below is its only product caller.
+std::expected<capture::RunnerPlan, std::string>
+admit_synth_dll_sample(const std::vector<std::uint8_t>& sample_bytes,
+                       const std::string& arrival_name, const std::filesystem::path& synth_dir,
+                       const std::filesystem::path& system_modules_dir,
+                       const bool system_modules_fallback)
+{
+    SyntheticModuleSource source(synth_dir, system_modules_dir, system_modules_fallback,
+                                 arrival_name);
+    return capture::admit_sample(sample_bytes, arrival_name, source);
+}
+
+namespace {
 
 std::expected<std::vector<std::uint8_t>, RebuildFailure>
 serialize_guest(const PreparedGuest& guest, const snapshot::PendingModule* pending)

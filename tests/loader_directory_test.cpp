@@ -1,4 +1,4 @@
-// Directory-mode system modules (change real-dll-module-dir, task 3.1): the
+// Directory-mode system modules: the
 // loader route's strict source tiers over a user directory - the boundary
 // pair derives under the committed manifest, other directory DLLs map as
 // real bytes, the API Set map is required and anchored, a missing closure
@@ -470,7 +470,7 @@ TEST(LoaderDirectory, CompatWhitelistCountsRealBodiesDoNot)
     // counted, the canonical name, nothing else - the real kernel32 body,
     // the syscall stubs, the trap and the alias spelling all stay out of
     // stub_calls. (The run may end in this fixture's post-call spin face -
-    // a hand-built-sample run quirk tracked with the 7.2 corpus work; the
+    // a hand-built-sample run quirk; the
     // counts drain before any stop kind returns.)
     ASSERT_EQ(stubs.size(), 1u);
     EXPECT_EQ(stubs.begin()->first, "RtlFoo");

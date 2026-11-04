@@ -1,4 +1,4 @@
-// API Set map (change real-dll-module-dir, task 2.3): the offline generator
+// API Set map: the offline generator
 // is deterministic (same JSON in, byte-identical .bin out), the bounded
 // reader rejects magic/version/architecture/anchor/range defects and
 // conflicting entries by name, and the explicit API-set context resolves

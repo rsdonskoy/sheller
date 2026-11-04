@@ -2,12 +2,14 @@
 
 #include "avx_shim.h"
 #include "diag_trace.h"
-#include "dll_loader.h"
 #include "dump_writer.h"
 #include "engine_hooks.h"
 #include "esp_target.h"
 #include "exception_pipeline.h"
 #include "intercept.h"
+#include "run_apply.h"
+#include "run_facts.h"
+#include "run_plan.h"
 #include "syscall_dispatch.h"
 
 #include "../syscalls/syscall_number_map.h"
@@ -80,284 +82,21 @@ std::expected<BoundedRun, RebuildFailure> run_entry_proof(PreparedGuest& guest)
                                                              .final_rip = final_rip}};
 }
 
-// Assembles the syscall-run state: restores the real entry bytes, wires the
-// sinks and the run-scoped tables (intercepts, stubs, resolved Nt names),
-// and reserves the engine-dispatch trampoline plus the deterministic
-// allocator cursors.
-std::expected<void, SyscallRunFailure> assemble_run_state(PreparedGuest& guest,
-                                                          const SyscallRunOptions& options,
-                                                          const FactChannel& facts,
-                                                          SyscallRunState& state)
+// Assembles the syscall-run state: decides the run plan (pure), then applies it
+// (the write half). The orchestration stays here so callers keep one entry
+// point; the two halves live in run_plan.* and run_apply.*.
+std::expected<void, SyscallRunFailure>
+assemble_run_state(PreparedGuest& guest, const SyscallRunOptions& options, const FactChannel& facts,
+                   const GuestFacts& guest_facts, SyscallRunState& state)
 {
-    // The syscall run executes the sample's real code, so the entry spin the
-    // capture path wrote must go: restore the original bytes from the
-    // snapshot metadata before the guest starts.
-    if (uc_mem_write(guest.unicorn.get(), guest.metadata.entry_address,
-                     guest.metadata.original_entry_bytes.data(),
-                     guest.metadata.original_entry_bytes.size()) != UC_ERR_OK) {
-        return std::unexpected(SyscallRunFailure{SyscallRunError::kUnicornFailure, {}, {}, {}});
+    // The orchestration: decide once (pure), then apply with the original
+    // write order. The two halves are separate functions so the split's
+    // boundary is visible at the call site.
+    auto plan = build_run_plan(guest, guest_facts, options);
+    if (!plan) {
+        return std::unexpected(std::move(plan.error()));
     }
-
-    state.policy = syscalls::PolicyTable{};
-    // Guest output is the host's decision, not the engine's: an empty sink
-    // means the bytes are dropped, and sink_trampoline's existing null check is
-    // what makes that cost nothing at the call site - the same shape as every
-    // other optional callback in SyscallRunOptions.
-    state.sink = options.write_sink;
-    state.event_sink = options.event_sink;
-    state.behavior_sink = facts.behavior_sink;
-    state.module_sink = facts.module_sink;
-    state.region_map = &guest.map;
-    state.relative_base = guest.relative_base;
-    // The captured process's own current directory is the faithful base for
-    // relative guest paths: PEB->ProcessParameters->CurrentDirectory (a
-    // CURDIR {UNICODE_STRING, HANDLE}). The snapshot route photographs it,
-    // so replay resolves exactly where the real process would have.
-    {
-        // RTL_USER_PROCESS_PARAMETERS->CurrentDirectory (Win11 24H2 x64:
-        // the CURDIR sits at +0x38; its DosPath UNICODE_STRING buffer
-        // pointer at +0x48). Verified against the captured packed sample.
-        const auto peb = guest.metadata.peb_address;
-        if (peb != 0) {
-            std::uint64_t params = 0;
-            std::uint64_t buffer = 0;
-            std::uint16_t len = 0;
-            if (uc_mem_read(guest.unicorn.get(), peb + 0x20, &params, sizeof params) == UC_ERR_OK &&
-                params != 0 &&
-                uc_mem_read(guest.unicorn.get(), params + 0x40, &len, sizeof len) == UC_ERR_OK &&
-                uc_mem_read(guest.unicorn.get(), params + 0x48, &buffer, sizeof buffer) ==
-                    UC_ERR_OK &&
-                len >= 2 && len % 2 == 0) {
-                // u16 (not wstring): std::u16string is a standard fs::path
-                // source on every host; a wstring source compiles only on
-                // Windows and aborts the Linux build.
-                std::u16string wide(len / 2, u'\0');
-                if (uc_mem_read(guest.unicorn.get(), buffer, wide.data(),
-                                wide.size() * sizeof(char16_t)) == UC_ERR_OK) {
-                    constexpr char16_t kSep = u'\\';
-                    if (!wide.empty() && wide.back() != kSep) {
-                        wide.push_back(kSep);
-                    }
-                    std::error_code ec;
-                    const std::filesystem::path cwd{wide};
-                    if (cwd.is_absolute() && std::filesystem::is_directory(cwd, ec)) {
-                        state.relative_base = cwd;
-                    }
-                }
-            }
-        }
-    }
-    state.max_blocks = options.max_blocks;
-    state.xfer_number = options.xfer_number;
-    state.esp_stop_goal = options.esp_stop_goal;
-    state.uc = guest.unicorn.get();
-    state.guest_mode = guest.guest_mode;
-    state.teb_base = guest.metadata.teb_address;
-    state.loader_modules = guest.loader_modules;
-    state.ldr_entry_vas = guest.ldr_entry_vas;
-    state.loader_route = guest.loader_route;
-    state.loader_exports = guest.loader_exports;
-    state.diag_watch_entries = options.diag_watch_entries;
-    state.diag_entry_hit = options.diag_entry_hit;
-    state.diag_write_hit = options.diag_write_hit;
-    state.diag_code_hit = options.diag_code_hit;
-    // SHELLER_LOOP_GATE_TRACE: per-window loop-gate verdict detail plus the run-end
-    // verdict distribution, both as kDebug records. Default off - nothing is rendered
-    // and the event stream stays byte-identical; the verdict counters accumulate
-    // either way (see SyscallRunState::loop_gate_counts). It is copied into the state
-    // because the hook path reads it per probe window.
-    state.loop_gate_trace = diag::loop_gate_on();
-    state.intercept_vas.clear();
-    state.intercept_ids.clear();
-    for (const auto& [va, id] : guest.intercepts) {
-        state.intercept_vas.push_back(va);
-        state.intercept_ids.push_back(id);
-    }
-
-    // DLL-input route: the pending module travels into the run state and
-    // the continuation-slot intercept arms (no-op without a pending block -
-    // EXE/shellcode runs pay nothing).
-    if (guest.pending.has_value()) {
-        state.pending_module = &*guest.pending;
-        state.loaded_modules = &guest.loaded_modules;
-        arm_dll_resume_slot(state, guest.unicorn.get());
-    }
-
-    // Heap-family interception: the loader route points
-    // PEB.ProcessHeap at the engine's deterministic heap region, which is
-    // not a real _HEAP - real ntdll heap-manager code running against it
-    // reads garbage internal pointers and dies (the packed corpus crashed
-    // in RtlDestroyHeap with environment-string bytes as the handle).
-    // Register the family at the mapped ntdll's export entries so every
-    // caller - IAT or direct/hash-resolved - lands in the engine heap; the
-    // handle value stays opaque to both sides.
-    for (const auto& entry : state.loader_exports) {
-        for (const auto& [name, id] : kHeapInterceptNames) {
-            if (fold_name(entry.name) != fold_name(name)) {
-                continue;
-            }
-            const auto registered = std::find(state.intercept_vas.begin(),
-                                              state.intercept_vas.end(), entry.function_va);
-            if (registered == state.intercept_vas.end()) {
-                state.intercept_vas.push_back(entry.function_va);
-                state.intercept_ids.push_back(static_cast<std::uint32_t>(id));
-            }
-        }
-        for (const auto& [name, id] : kLdrInterceptNames) {
-            if (fold_name(entry.name) != fold_name(name)) {
-                continue;
-            }
-            const auto registered = std::find(state.intercept_vas.begin(),
-                                              state.intercept_vas.end(), entry.function_va);
-            if (registered == state.intercept_vas.end()) {
-                state.intercept_vas.push_back(entry.function_va);
-                state.intercept_ids.push_back(static_cast<std::uint32_t>(id));
-            }
-        }
-    }
-    state.fidelity_dispatch = options.windows_fidelity_dispatch;
-    // Resolve each intercept's export name and
-    // owning region-map module index for event emission. Every loader-route
-    // export that is NOT intercepted is a deterministic stub - those join
-    // the counting table (hook bumps a slot counter; the run end drains
-    // once into options.stub_sink, off the hot path).
-    state.stub_sink = options.stub_sink;
-    // Resolve number -> Nt name once (real ntdll stubs
-    // only; synthetic 0x1000+ numbers never collide). One allocation, off
-    // the hook hot path.
-    for (const auto& mod : state.loader_modules) {
-        if (fold_name(std::string_view(mod.name.data())) != "ntdll") {
-            continue;
-        }
-        for (const auto& entry :
-             syscalls::enumerate_ntdll_syscalls(guest.unicorn.get(), mod.base)) {
-            state.syscall_numbers_by_name.emplace(std::string(entry.name.data()), entry.number);
-        }
-        state.syscall_names.clear();
-        for (const auto& [name, number] : state.syscall_numbers_by_name) {
-            state.syscall_names.emplace(number, name);
-        }
-        break;
-    }
-    state.intercept_names.clear();
-    state.intercept_modules.clear();
-    state.stub_slots.clear();
-    state.stub_entries.clear();
-    const auto module_index_for_va = [&state](const std::uint64_t va) -> std::uint16_t {
-        for (const auto& mod : state.loader_modules) {
-            if (va >= mod.base && va < mod.base + mod.size) {
-                if (state.region_map != nullptr) {
-                    if (const auto idx = state.region_map->module_index_by_name(
-                            fold_name(std::string_view(mod.name.data())));
-                        idx.has_value()) {
-                        return static_cast<std::uint16_t>(*idx);
-                    }
-                }
-                break;
-            }
-        }
-        return 0xFFFF; // kRuntimeIndex: no region-map owner resolved
-    };
-    for (std::size_t i = 0; i < state.intercept_vas.size(); ++i) {
-        const auto va = state.intercept_vas[i];
-        std::string name;
-        for (const auto& entry : state.loader_exports) {
-            if (entry.function_va == va) {
-                name = entry.name;
-                break;
-            }
-        }
-        state.intercept_names.push_back(std::move(name));
-        state.intercept_modules.push_back(module_index_for_va(va));
-    }
-    if (guest.directory_mode) {
-        // directory mode counts ONLY the explicit whitelist (derived compat
-        // stubs plus fallback synthetic exports) - the "every non-intercepted
-        // export is a stub" inference is a synthetic-mode rule and would
-        // miscount real bodies, data slots, syscall stubs and traps. Alias
-        // names sharing one VA land in one slot: the first whitelist row is
-        // the stable canonical name.
-        for (const auto& entry : guest.stub_whitelist) {
-            if (std::find(state.intercept_vas.begin(), state.intercept_vas.end(),
-                          entry.function_va) != state.intercept_vas.end()) {
-                continue;
-            }
-            if (state.stub_slots.find(entry.function_va) != state.stub_slots.end()) {
-                continue; // shared VA alias: one slot, one count
-            }
-            const auto slot = static_cast<std::uint32_t>(state.stub_entries.size());
-            state.stub_entries.push_back({module_index_for_va(entry.function_va), entry.name, 0});
-            state.stub_slots.emplace(entry.function_va, slot);
-        }
-        state.boundary_trap_vas = guest.boundary_trap_vas;
-        state.boundary_trap_names = guest.boundary_trap_names;
-        state.directory_mode = true;
-        state.api_set_ctx.mode = loader::ApiSetContext::Mode::kDirectoryMap;
-        state.api_set_ctx.directory_map = &guest.api_set_map;
-        for (const auto va : guest.boundary_trap_vas) {
-            // an intercept registration on the same VA supersedes the trap:
-            // the engine answers the call in the hook and the ud2 body is
-            // never reached (the manifest row stays trap-classified; the
-            // interception layer is the engine support landing on it)
-            const auto intercepted =
-                std::find(state.intercept_vas.begin(), state.intercept_vas.end(), va) !=
-                state.intercept_vas.end();
-            if (intercepted) {
-                continue;
-            }
-            uc_hook trap_hook = 0;
-            if (uc_hook_add(guest.unicorn.get(), &trap_hook, UC_HOOK_CODE,
-                            reinterpret_cast<void*>(on_boundary_trap), &state, va,
-                            va) != UC_ERR_OK) {
-                return std::unexpected(
-                    SyscallRunFailure{SyscallRunError::kUnicornFailure, {}, {}, {}});
-            }
-        }
-    } else {
-        for (const auto& entry : state.loader_exports) {
-            const auto intercepted = std::find(state.intercept_vas.begin(),
-                                               state.intercept_vas.end(), entry.function_va);
-            if (intercepted != state.intercept_vas.end()) {
-                continue; // intercepted exports emit apicall events, not counts
-            }
-            const auto slot = static_cast<std::uint32_t>(state.stub_entries.size());
-            state.stub_entries.push_back({module_index_for_va(entry.function_va), entry.name, 0});
-            state.stub_slots.emplace(entry.function_va, slot);
-        }
-    }
-    if (static_cast<bool>(state.stub_sink) && !state.stub_entries.empty()) {
-        for (const auto& mod : state.loader_modules) {
-            uc_hook stub_hook = 0;
-            if (uc_hook_add(guest.unicorn.get(), &stub_hook, UC_HOOK_CODE,
-                            reinterpret_cast<void*>(on_stub_code), &state, mod.base,
-                            mod.base + mod.size) != UC_ERR_OK) {
-                return std::unexpected(
-                    SyscallRunFailure{SyscallRunError::kUnicornFailure, {}, {}, {}});
-            }
-        }
-    }
-    // loader-route deterministic allocator cursors (zeroed for other routes)
-    const auto& run_layout = layout_for(guest.guest_mode);
-    // Engine dispatch: the trampoline page (int3 marker the callback
-    // return address points at), per-layer scratch for the guest
-    // EXCEPTION_RECORD/CONTEXT/DISPATCHER_CONTEXT structs, and per-layer
-    // callback stacks. Reserved from the front of the deterministic alloc
-    // bump range; both dispatch modes map it (only the engine mode consumes
-    // it). The callback stacks deliberately do NOT ride the guest stack: a
-    // captured snapshot's committed stack may not extend below the faulting
-    // rsp, and a silent staging write to unmapped memory would zero the
-    // handler's return address.
-    const auto seh_trampoline = run_layout.alloc_base;
-    if (uc_mem_map(guest.unicorn.get(), seh_trampoline, 0x21000, UC_PROT_ALL) != UC_ERR_OK) {
-        return std::unexpected(SyscallRunFailure{SyscallRunError::kUnicornFailure, {}, {}, {}});
-    }
-    const std::uint8_t trampoline_marker = 0xCC; // int3: the INTR hook keys on the rip
-    uc_mem_write(guest.unicorn.get(), seh_trampoline, &trampoline_marker, 1);
-    state.seh.trampoline = seh_trampoline;
-    state.seh.scratch = seh_trampoline + 0x1000;
-    state.valloc_cursor = run_layout.alloc_base + 0x21000;
-    state.heap_cursor = run_layout.heap_base;
-    return {};
+    return apply_run_plan(guest, options, facts, guest_facts, *plan, state);
 }
 
 // Seeds the policy table with the built-in semantics (real numbers resolved
@@ -758,24 +497,24 @@ run_syscalls(PreparedGuest& guest, const SyscallRunOptions& options, const FactC
         }
     }
     SyscallRunState state;
-    if (const auto assembled = assemble_run_state(guest, options, facts, state); !assembled) {
+    // The read-only facts are gathered once, before any write assembly: the
+    // PEB-derived cwd, the ntdll number <-> name tables, and the sample
+    // module's index/image span feed both the state assembly and the write
+    // ledger below.
+    const GuestFacts guest_facts = snapshot_guest_facts(guest);
+    if (const auto assembled = assemble_run_state(guest, options, facts, guest_facts, state);
+        !assembled) {
         return std::unexpected(assembled.error());
     }
     std::uint64_t ntdll_base = seed_policy_and_normalize(guest, options, state);
-    // Write ledger: every guest memory write marks its page
-    // dirty in the owning snapshot region. Writer attribution needs the
-    // sample's full image span (base + SizeOfImage from the module record
-    // at the snapshot image base) - a capture splits the image into several
-    // protection regions, so a bare base check would drop the body writes.
-    std::uint64_t sample_image_size = 0;
-    for (std::size_t i = 0; i < guest.map.module_count(); ++i) {
-        if (guest.map.module(i).base == guest.metadata.image_base) {
-            sample_image_size = guest.map.module(i).size;
-            state.sample_module_known = true;
-            state.sample_module_index = i;
-            break;
-        }
-    }
+    // Write ledger: every guest memory write marks its page dirty in the
+    // owning snapshot region. Writer attribution needs the sample's full image
+    // span (base + SizeOfImage from the module record at the snapshot image
+    // base) - a capture splits the image into several protection regions, so a
+    // bare base check would drop the body writes. The ledger object stays on
+    // this stack (it must outlive the apply stage and the whole run; the run
+    // state only carries its pointer).
+    const std::uint64_t sample_image_size = guest_facts.sample_image_size;
     MemWriteLedger write_ledger(guest.regions, guest.metadata.image_base, sample_image_size);
 
     uc_hook mem_write_hook = 0;

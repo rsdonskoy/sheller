@@ -18,7 +18,7 @@ bool on_mem_write_prot_callback(uc_engine* const uc, const uc_mem_type, const st
 // Block hook of the syscall run: bumps the block counter and, when an event
 // sink is attached, emits block-exec with the block start address (the hook
 // address is the block start). Hot path: no allocation, no IO.
-// Directory-mode boundary trap (change real-dll-module-dir): an
+// Directory-mode boundary trap: an
 // exact-entry code hook over each (c)-class trap VA. Fills the named
 // diagnosis, marks the deliberate stop and halts - the ud2 body and every
 // instruction after the call never execute, and the caller is answered by
@@ -73,7 +73,7 @@ bool on_rdtscp_callback(uc_engine* const uc, void* const user_data);
 // changed GPR to its loop-exit value and letting the branch fall through
 // naturally (decoder-free). Emits the kLoopSkip behavior fact on success.
 // The same window produces the loop-native-gate verdict (static closed-CFG
-// scan + the cycle's dynamic evidence): ledger-only in this slice, printed
+// scan + the cycle's dynamic evidence): ledger-only, printed
 // per window under SHELLER_LOOP_GATE_TRACE.
 void run_loop_probe(SyscallRunState& state, uc_engine* uc);
 

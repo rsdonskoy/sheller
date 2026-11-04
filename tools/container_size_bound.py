@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
-"""Derive the crafted-container size bound from build inputs (design D5).
+"""Derive the crafted-container size bound from build inputs.
 
 The bound is never hand-written: it is computed from the synthetic module
 directory actually generated for the build, the test sample's SizeOfImage,
 and the engine constants that reserve the environment/stack/heap/KUSER
 regions. The output header is consumed by the container-size assertions.
 
-Formula (design D5):
+Formula:
   (sum of module SizeOfImage + kEnvBlockSize + sample SizeOfImage
    + stack + heap + KUSER page) * 1.25
 
@@ -87,7 +87,7 @@ def main():
 
     if module_bytes != EXPECTED_MODULE_BYTES_X64:
         raise ValueError(
-            f"x64 module SizeOfImage sum is {module_bytes}, design D5 pins "
+            f"x64 module SizeOfImage sum is {module_bytes}, expected "
             f"{EXPECTED_MODULE_BYTES_X64}")
 
     header = pathlib.Path(args.header)

@@ -1,0 +1,6 @@
+# multi_module.dll
+kernel32.dll	LoadLibraryW	0
+kernel32.dll	ExitProcess	0
+user32.dll	MessageBoxW	0
+ntdll.dll		270
+KERNELBASE.dll	CreateFileW	0

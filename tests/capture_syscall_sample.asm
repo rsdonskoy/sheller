@@ -1,4 +1,4 @@
-; Synthetic hello sample for the syscall-skeleton slice: three direct
+; Synthetic hello sample for the syscall route: three direct
 ; syscalls (synthetic numbers shared with the C++ policy table) covering the
 ; minimal handler set - NtWriteFile("hello"), NtDelayExecution (no-op) and
 ; NtTerminateProcess(0x1234). The entry is patched into a spin by the

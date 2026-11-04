@@ -357,7 +357,7 @@ TEST(EventLedgerTimeline, XferAttributionMatchesThePublicResolver)
     // exactly what the public resolver produces for the same indexes. A
     // private copy inside the render layer would drift from the artifacts the
     // library fills, and the report and the timeline would name the same event
-    // differently - which the behavior-rules report requirement forbids.
+    // differently - which the report contract forbids.
     behavior::EventLedger ledger;
     sheller::EventPreamble pre{.seq = 0, .tid = 0, .pc = 0x77000000};
     std::array<std::uint8_t, 8> xfer{};

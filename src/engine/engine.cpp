@@ -1,5 +1,4 @@
 // Engine module: queries the linked unicorn engine.
-// Full engine (snapshot replay, memory, hooks) lands in later slices.
 
 #include "engine_detail.h"
 

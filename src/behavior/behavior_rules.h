@@ -38,7 +38,7 @@ struct BehaviorRulesParams {
     std::uint64_t sample_image_base{};
     std::uint64_t sample_image_size{};
     std::uint64_t ntdll_base{};
-    // Resolved NtQueryInformationProcess number (number-resolution slice);
+    // Resolved NtQueryInformationProcess number (number resolution);
     // 0 disables the query sub-type.
     std::uint32_t query_process_number{};
     // Module records in MemRegionMap index order - the xfer payload's module

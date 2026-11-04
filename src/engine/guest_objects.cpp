@@ -118,7 +118,7 @@ void apply_open_section(SyscallRunState& state, uc_engine* uc,
     // prior System-DLL fallback here answered a synthetic section for any
     // host-System32 name, which walked the replayed loader down the
     // KnownDll-section branch native never runs (its failure tail is the
-    // WER report path whose NtAlpcConnectPort this change was filed for).
+    // WER report path built on NtAlpcConnectPort).
     outcome.status = syscalls::kStatusObjectNameNotFound;
 }
 

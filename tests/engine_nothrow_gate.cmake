@@ -67,7 +67,7 @@ endforeach()
 # anchor was previously doing the job of comment stripping - "never throw", "the
 # catch-all funclet" and the rest of the prose in these files is why - so the scan
 # strips comments (gate_strip_comments) and the patterns are free to match wherever
-# the keyword appears. Measured before this change: `[] { throw 1; }`, which
+# the keyword appears. Measured: `[] { throw 1; }`, which
 # clang-format leaves on one line, `if (true) throw 1;` and `int p = 0; throw p;`
 # all passed the anchored form, so the ban had a spelling that evaded it.
 set(try_pattern   "(^|[^A-Za-z0-9_])try([^A-Za-z0-9_]|$)")

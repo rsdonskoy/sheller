@@ -1,4 +1,4 @@
-; entry code for the loader-imports e2e: VirtualAlloc via IAT, prove the
+; entry code for the import e2e: VirtualAlloc via IAT, prove the
 ; page is writable, then ExitProcess(1122h) via IAT
 .code
 entry proc

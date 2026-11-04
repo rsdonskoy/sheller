@@ -2,7 +2,7 @@
 // facade's semantic events (all types interleaved, names resolved
 // in-library, no grouping, no count cap), the exact counts header, the
 // stub-call snapshot, and byte-exact determinism. Pure standard library -
-// runs on both platforms. The behavior-rules "低量事件类明细" scenarios
+// runs on both platforms. The low-volume event-detail scenarios
 // pin here.
 //
 // The full-level detail is the merged stream over the semantic tier and the

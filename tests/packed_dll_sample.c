@@ -3,8 +3,8 @@
 // tests\packed_dll_sample.c user32.lib /Fe:<tmp>\packed_orig.dll, then
 //   upx -o tests\packed.dll <tmp>\packed_orig.dll
 //   upx -d -o tests\packed.dll.unp tests\packed.dll
-// x64 /MT, imports kernel32 + user32 (dll-sample-support system-dependency
-// admission: verified system DLLs preload through the runner's import
+// x64 /MT, imports kernel32 + user32 (system-dependency admission:
+// verified system DLLs preload through the runner's import
 // table). One named export keeps LoadLibrary/GetProcAddress usable. Both
 // auto-run paths print a distinct marker through kernel32!GetStdHandle +
 // WriteFile - the NtWriteFile-on-stdout path the engine forwards under

@@ -2,6 +2,7 @@
 
 #include "dll_admission.h"
 
+#include "admission.h"
 #include "pe_headers.h"
 
 #ifndef WIN32_LEAN_AND_MEAN
@@ -14,24 +15,18 @@
 #include <cstdint>
 #include <cstring>
 #include <cwctype>
+#include <deque>
 #include <format>
 #include <fstream>
+#include <iterator>
 #include <optional>
 #include <set>
 #include <span>
+#include <string_view>
+#include <utility>
 
 namespace sheller::capture {
 namespace {
-
-std::string folded(const std::string& name)
-{
-    std::string out;
-    out.reserve(name.size());
-    for (const char c : name) {
-        out.push_back(static_cast<char>(std::tolower(static_cast<unsigned char>(c))));
-    }
-    return out;
-}
 
 std::wstring to_wide(const std::string& text)
 {
@@ -261,111 +256,112 @@ std::string admission_error(const std::string& module, const char* reason)
     return std::format("dependency {}: {}", module, reason);
 }
 
-} // namespace
-
-std::expected<RunnerPlan, std::string>
-admit_dll_sample(const std::vector<std::uint8_t>& sample_bytes, const std::string& arrival_name)
-{
-    // The arrival name becomes the runner's path string and the emulated
-    // Ldr entry's BaseDllName (bounded to 64 chars there) - enforce one
-    // bound at the source. Non-ASCII is rejected honestly rather than
-    // through a lossy widening the engine cannot round-trip.
-    if (arrival_name.empty() || arrival_name.size() > 64 ||
-        !std::all_of(arrival_name.begin(), arrival_name.end(),
-                     [](const unsigned char c) { return c >= 0x20 && c < 0x7F && c != '\\'; })) {
-        return std::unexpected("sample file name: empty, non-ASCII, or over 64 characters");
-    }
-    std::vector<PeImportThunk> imports;
-    if (const auto error = parse_imports(sample_bytes.data(), sample_bytes.size(), imports);
-        error != PeError::kNone) {
-        return std::unexpected(std::string(pe_error_message(error)));
+// One verified system module, owned by the source for the admission pass.
+// The export table's pointers index `bytes_`, which lives as long as the view;
+// the view is constructed in place in the source's deque and never moved.
+class SystemModuleView final : public ModuleView {
+  public:
+    SystemModuleView(std::string spelled, std::vector<std::uint8_t> bytes)
+        : spelled_(std::move(spelled)), bytes_(std::move(bytes))
+    {
+        name = spelled_;
+        std::vector<PeImportThunk> parsed;
+        if (parse_imports(bytes_.data(), bytes_.size(), parsed) == PeError::kNone) {
+            closure_imports_ = std::move(parsed);
+        }
+        exports_ = parse_exports({bytes_.data(), bytes_.size()});
     }
 
-    RunnerPlan plan;
-    plan.arch = WrapArch::kX64;
-    plan.arrival_name = arrival_name;
-    plan.imports.push_back({"kernel32.dll", "LoadLibraryW", 0});
-    plan.imports.push_back({"kernel32.dll", "ExitProcess", 0});
+    SystemModuleView(const SystemModuleView&) = delete;
+    SystemModuleView& operator=(const SystemModuleView&) = delete;
+    SystemModuleView(SystemModuleView&&) = delete;
+    SystemModuleView& operator=(SystemModuleView&&) = delete;
 
-    // BFS over the dependency closure. Level 0 entries (the sample's direct
-    // imports) each contribute one runner import; deeper levels are
-    // verification-only - the loader resolves the chain through the same
-    // system32 search when it initializes the runner's imports.
-    struct QueueEntry {
-        std::string module;
-        bool direct;
-    };
-    std::vector<QueueEntry> queue;
-    for (const auto& import : imports) {
-        if (std::none_of(queue.begin(), queue.end(), [&](const QueueEntry& entry) {
-                return folded(entry.module) == folded(import.module);
-            })) {
-            queue.push_back({import.module, true});
-        }
+    std::expected<Hit, std::string> resolves(const std::string_view symbol,
+                                             const std::uint16_t ordinal) override
+    {
+        const ExportHit found = find_export(exports_, std::string{symbol}, ordinal, symbol.empty());
+        Hit hit;
+        hit.exported = found.exported;
+        hit.forwarder = found.forwarder;
+        hit.forward_to = found.forwarded_to;
+        return hit;
     }
 
-    std::set<std::string> processed{folded("kernel32.dll")}; // base pair covers it
-    std::size_t cursor = 0;
-    while (cursor < queue.size()) {
-        const QueueEntry entry = queue[cursor++];
-        const std::string key = folded(entry.module);
-        if (key == folded(arrival_name)) {
-            return std::unexpected(
-                admission_error(entry.module, "dependency name collides with the sample"));
-        }
-        if (processed.count(key) != 0) {
-            continue;
-        }
-        processed.insert(key);
-        if (entry.module.empty() || entry.module.find('\\') != std::string::npos ||
-            entry.module.find('/') != std::string::npos ||
-            entry.module.find(':') != std::string::npos ||
-            entry.module.find("..") != std::string::npos) {
-            return std::unexpected(admission_error(entry.module, "path-shaped import name"));
-        }
+    std::span<const PeImportThunk> imports() const override
+    {
+        return closure_imports_;
+    }
 
-        // System verification. The data-file probe is the primary path: with
-        // LOAD_LIBRARY_SEARCH_SYSTEM32 the loader's search set is exactly the
-        // system directory (a same-named file in the sample's or current
-        // directory is unreachable), and AS_DATAFILE means no code runs - so
-        // probe success itself proves the system source. API-set virtual
-        // names fail that probe (no backing file) and fall through to a real
-        // system32-only load, where the module's path is checked into
-        // System32 (GetModuleFileNameW works for real loads only - the
-        // data-file probe returns an empty path by contract).
-        std::vector<std::uint8_t> module_bytes;
-        HMODULE map = LoadLibraryExW(to_wide(entry.module).c_str(), nullptr,
+  private:
+    std::string spelled_;
+    std::vector<std::uint8_t> bytes_;
+    ExportTable exports_;
+    std::vector<PeImportThunk> closure_imports_;
+};
+
+// The Windows route's module source: the operating system is the trusted world.
+// The data-file probe is the primary path (search set is exactly the system
+// directory and no code runs); API-set virtual names fail it and fall through
+// to a real system32-only load whose module path is checked back. The handle is
+// released inside acquire - the skeleton never holds a library reference. The
+// verified bytes (and their parsed export/import tables) are retained per view
+// for the admission pass: the skeleton may look at a module again while its
+// closure is walked, and the sample's own dependency count is bounded by
+// parse_imports (64 descriptors).
+class SystemModuleSource final : public ModuleSource {
+  public:
+    ModuleView* acquire(const std::string_view spelled, const std::string_view,
+                        std::string& error) override
+    {
+        const std::string module{spelled};
+        HMODULE map = LoadLibraryExW(to_wide(module).c_str(), nullptr,
                                      LOAD_LIBRARY_SEARCH_SYSTEM32 | LOAD_LIBRARY_AS_DATAFILE);
         const bool via_datafile = map != nullptr;
         if (map == nullptr) {
-            map = LoadLibraryExW(to_wide(entry.module).c_str(), nullptr,
-                                 LOAD_LIBRARY_SEARCH_SYSTEM32);
+            map = LoadLibraryExW(to_wide(module).c_str(), nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32);
         }
         if (map == nullptr) {
-            return std::unexpected(admission_error(entry.module, "not a verifiable system module"));
+            error = admission_error(module, "not a verifiable system module");
+            return nullptr;
         }
+        // RAII in every direction: an early refusal below cannot leak the
+        // reference, and the success path releases explicitly before the reads.
+        struct ModuleHandle {
+            HMODULE value;
+            ~ModuleHandle()
+            {
+                if (value != nullptr) {
+                    FreeLibrary(value);
+                }
+            }
+        } handle{map};
         wchar_t module_path[MAX_PATH * 2] = {};
         bool path_ok = true;
         if (!via_datafile) {
             path_ok = GetModuleFileNameW(map, module_path, MAX_PATH * 2) != 0 &&
                       under_system_directory(module_path);
         }
-        FreeLibrary(map);
         if (!path_ok) {
-            return std::unexpected(admission_error(
-                entry.module, "resolves outside the system directory (private module)"));
+            error =
+                admission_error(module, "resolves outside the system directory (private module)");
+            return nullptr;
         }
+        FreeLibrary(map);
+        handle.value = nullptr;
+
+        std::vector<std::uint8_t> module_bytes;
         if (via_datafile) {
             // Re-derive the verified file path for the byte reads below.
             wchar_t system_dir[MAX_PATH] = {};
             const auto length = GetSystemDirectoryW(system_dir, MAX_PATH);
             if (length == 0 || length >= MAX_PATH) {
-                return std::unexpected(
-                    admission_error(entry.module, "system directory unreadable"));
+                error = admission_error(module, "system directory unreadable");
+                return nullptr;
             }
             std::wstring wide{system_dir, length};
             wide += L'\\';
-            wide += to_wide(entry.module);
+            wide += to_wide(module);
             const int needed =
                 WideCharToMultiByte(CP_UTF8, 0, wide.c_str(), -1, nullptr, 0, nullptr, nullptr);
             std::string utf8(static_cast<std::size_t>(needed > 0 ? needed - 1 : 0), '\0');
@@ -382,68 +378,44 @@ admit_dll_sample(const std::vector<std::uint8_t>& sample_bytes, const std::strin
                                                      std::istreambuf_iterator<char>()};
         }
         if (module_bytes.empty()) {
-            return std::unexpected(admission_error(entry.module, "system module unreadable"));
+            error = admission_error(module, "system module unreadable");
+            return nullptr;
         }
-
-        // The module's own imports join the closure (verification only).
-        std::vector<PeImportThunk> module_imports;
-        if (parse_imports(module_bytes.data(), module_bytes.size(), module_imports) ==
-            PeError::kNone) {
-            for (const auto& import : module_imports) {
-                const std::string dep_key = folded(import.module);
-                if (dep_key != folded("kernel32.dll") && dep_key != folded(arrival_name) &&
-                    processed.count(dep_key) == 0 &&
-                    std::none_of(queue.begin(), queue.end(), [&](const QueueEntry& pending) {
-                        return folded(pending.module) == dep_key;
-                    })) {
-                    queue.push_back({import.module, false});
-                }
-            }
-        }
-
-        if (!entry.direct) {
-            continue;
-        }
-
-        // Pick the first referenced symbol that resolves in this module's
-        // export table; a forwarder adds its target DLL to the closure.
-        const ExportTable exports = parse_exports(module_bytes);
-        bool selected = false;
-        for (const auto& import : imports) {
-            if (folded(import.module) != key) {
-                continue;
-            }
-            const ExportHit hit =
-                find_export(exports, import.name, import.ordinal, import.name.empty());
-            if (!hit.exported) {
-                continue;
-            }
-            if (hit.forwarder) {
-                const std::string target_key = folded(hit.forwarded_to);
-                if (target_key != folded("kernel32.dll") && target_key != folded(arrival_name) &&
-                    processed.count(target_key) == 0 &&
-                    std::none_of(queue.begin(), queue.end(), [&](const QueueEntry& pending) {
-                        return folded(pending.module) == target_key;
-                    })) {
-                    queue.push_back({hit.forwarded_to, false});
-                }
-            }
-            plan.imports.push_back({entry.module, import.name, import.ordinal});
-            if (plan.imports.size() > kMaxRunnerImports) {
-                return std::unexpected("dependency closure exceeds the runner capacity");
-            }
-            selected = true;
-            break;
-        }
-        if (!selected) {
-            // Without an importable symbol the runner cannot preload this
-            // dependency - out of contract, by name.
-            return std::unexpected(
-                admission_error(entry.module, "no importable export for the referenced symbol"));
-        }
+        views_.emplace_back(module, std::move(module_bytes));
+        return &views_.back();
     }
 
-    return plan;
+    bool walk_full_closure() const override
+    {
+        return true;
+    }
+
+    std::string dependency_error(const std::string_view spelled,
+                                 const AdmissionProblem problem) const override
+    {
+        const std::string module{spelled};
+        switch (problem) {
+        case AdmissionProblem::kCollisionWithSample:
+            return admission_error(module, "dependency name collides with the sample");
+        case AdmissionProblem::kPathShapedName:
+            return admission_error(module, "path-shaped import name");
+        case AdmissionProblem::kNoImportableExport:
+            return admission_error(module, "no importable export for the referenced symbol");
+        }
+        return admission_error(module, "unverifiable dependency");
+    }
+
+  private:
+    std::deque<SystemModuleView> views_;
+};
+
+} // namespace
+
+std::expected<RunnerPlan, std::string>
+admit_dll_sample(const std::vector<std::uint8_t>& sample_bytes, const std::string& arrival_name)
+{
+    SystemModuleSource source;
+    return admit_sample(sample_bytes, arrival_name, source);
 }
 
 } // namespace sheller::capture

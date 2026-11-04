@@ -156,7 +156,7 @@ that audit.
 * **32-bit PE (PE32)** - supported on Windows through the real WOW64 loader:
   the capture reads the 32-bit PEB/TEB and the replay runs in 32-bit guest
   mode. The Linux sample route refuses PE32 with a named failure (32-bit
-  container replay is a tracked backlog item).
+  container replay is not supported).
 * **DLLs** - supported as x64 direct input on Windows (and for replaying
   an already-captured v2 container anywhere): the capture spawns a
   generated load-stub runner - base imports `kernel32!LoadLibraryW` and

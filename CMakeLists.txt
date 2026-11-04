@@ -53,8 +53,7 @@ find_package(CLI11 CONFIG REQUIRED)
 find_package(Zydis CONFIG REQUIRED)
 
 # xxhash binds the directory-mode boundary manifest and API Set map to their
-# input images (whole-file xxhash64 anchors, design D2/D5 of
-# real-dll-module-dir).
+# input images (whole-file xxhash64 anchors).
 find_package(xxHash CONFIG REQUIRED)
 
 # Warnings-as-errors and hardening flags apply to first-party targets only

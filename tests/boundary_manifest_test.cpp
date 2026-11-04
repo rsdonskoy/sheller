@@ -1,4 +1,4 @@
-// Boundary manifest binding (change real-dll-module-dir, task 2.2): the
+// Boundary manifest binding: the
 // committed seed's applicability verdicts are named rejections (unknown
 // module/arch, image-hash mismatch), the seed rows drive the derive
 // end-to-end (an export outside the seed coverage is a named rejection),
@@ -43,7 +43,7 @@ TEST(BoundaryManifest, ApplicabilityVerdictsAreNamed)
     ASSERT_FALSE(unknown_module.has_value());
     EXPECT_EQ(unknown_module.error(), BoundaryManifestError::kUnknownModule);
 
-    // unknown architecture: the x86 rows simply do not exist in phase 1
+    // unknown architecture: the x86 rows simply do not exist
     const auto unknown_arch = manifest.rules_for("ntdll.dll", "x86", kFixtureNtdllXxhash64);
     ASSERT_FALSE(unknown_arch.has_value());
     EXPECT_EQ(unknown_arch.error(), BoundaryManifestError::kUnknownModule);

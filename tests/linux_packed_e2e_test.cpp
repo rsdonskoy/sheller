@@ -66,7 +66,7 @@ TEST(LinuxPackedE2E, SnapshotRouteRunsAndRepairs)
     const auto stats = sheller::engine::run_snapshot_syscalls(snapshot, options);
     // The payload-init divergence (payload usage/argv heap
     // corruption) causes an unhandled crash at the same ntdll heap-lock
-    // leaf as on Windows — tracked in BACKLOG, not a Linux regression.
+    // leaf as on Windows — a known gap, not a Linux regression.
     if (!stats.has_value()) {
         EXPECT_EQ(stats.error().error, sheller::engine::SyscallRunError::kUnhandledException)
             << "unexpected stop kind: " << static_cast<int>(stats.error().error);

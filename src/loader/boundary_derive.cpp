@@ -334,8 +334,8 @@ derive_boundary_image(std::span<const std::uint8_t> file, const std::string_view
             BoundaryDeriveError::kBadSource,
             std::format("{}: source rejected: {}", module_name, load_error_message(info.error()))));
     }
-    // Phase 1 derives the x64 boundary pair only (design Non-Goals: no x86
-    // directory mode; the manifest schema reserves the x86 ABI field).
+    // The derivation covers the x64 boundary pair only: no x86 directory mode,
+    // though the manifest schema reserves the x86 ABI field.
     if (info->bitness != kBitness64) {
         return std::unexpected(
             fail(BoundaryDeriveError::kUnsupportedMachine,
