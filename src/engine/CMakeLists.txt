@@ -31,6 +31,8 @@ target_sources(sheller_engine PRIVATE
   run.h
   run_facts.cpp
   run_facts.h
+  run_plan.cpp
+  run_plan.h
   seh_dispatcher.cpp
   seh_dispatcher.h
   syscall_dispatch.cpp

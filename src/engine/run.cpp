@@ -9,6 +9,7 @@
 #include "exception_pipeline.h"
 #include "intercept.h"
 #include "run_facts.h"
+#include "run_plan.h"
 #include "syscall_dispatch.h"
 
 #include "../syscalls/syscall_number_map.h"
@@ -89,6 +90,15 @@ std::expected<void, SyscallRunFailure>
 assemble_run_state(PreparedGuest& guest, const SyscallRunOptions& options, const FactChannel& facts,
                    const GuestFacts& guest_facts, SyscallRunState& state)
 {
+    // The pure decision core: every table and verdict the run needs, computed
+    // from the construction tables and the guest facts alone
+    // (change run-plan-decision-core). The writes below keep their original
+    // order and only consume the plan.
+    auto plan = build_run_plan(guest, guest_facts, options);
+    if (!plan) {
+        return std::unexpected(std::move(plan.error()));
+    }
+
     // The syscall run executes the sample's real code, so the entry spin the
     // capture path wrote must go: restore the original bytes from the
     // snapshot metadata before the guest starts.
@@ -100,7 +110,7 @@ assemble_run_state(PreparedGuest& guest, const SyscallRunOptions& options, const
             SyscallRunError::kUnicornFailure, static_cast<std::uint32_t>(restore_error), {}, {}});
     }
 
-    state.policy = syscalls::PolicyTable{};
+    state.policy = plan->policy;
     // Guest output is the host's decision, not the engine's: an empty sink
     // means the bytes are dropped, and sink_trampoline's existing null check is
     // what makes that cost nothing at the call site - the same shape as every
@@ -135,54 +145,22 @@ assemble_run_state(PreparedGuest& guest, const SyscallRunOptions& options, const
     // either way (see SyscallRunState::loop_gate_counts). It is copied into the state
     // because the hook path reads it per probe window.
     state.loop_gate_trace = diag::loop_gate_on();
-    state.intercept_vas.clear();
-    state.intercept_ids.clear();
-    for (const auto& [va, id] : guest.intercepts) {
-        state.intercept_vas.push_back(va);
-        state.intercept_ids.push_back(id);
-    }
-
-    // DLL-input route: the pending module travels into the run state and
-    // the continuation-slot intercept arms (no-op without a pending block -
-    // EXE/shellcode runs pay nothing).
-    if (guest.pending.has_value()) {
+    // DLL-input route: the pending module travels into the run state and the
+    // continuation-slot intercept arms (no-op without a pending block -
+    // EXE/shellcode runs pay nothing). The arming maps the heap band and the
+    // slot page and appends the continuation slot to the state lists; the
+    // plan's assignment below replaces them with the identical final contents.
+    if (plan->arm_resume_slot) {
         state.pending_module = &*guest.pending;
         state.loaded_modules = &guest.loaded_modules;
         arm_dll_resume_slot(state, guest.unicorn.get());
     }
+    state.intercept_vas = plan->intercept_vas;
+    state.intercept_ids = plan->intercept_ids;
 
-    // Heap-family interception: the loader route points
-    // PEB.ProcessHeap at the engine's deterministic heap region, which is
-    // not a real _HEAP - real ntdll heap-manager code running against it
-    // reads garbage internal pointers and dies (the packed corpus crashed
-    // in RtlDestroyHeap with environment-string bytes as the handle).
-    // Register the family at the mapped ntdll's export entries so every
-    // caller - IAT or direct/hash-resolved - lands in the engine heap; the
-    // handle value stays opaque to both sides.
-    for (const auto& entry : state.loader_exports) {
-        for (const auto& [name, id] : kHeapInterceptNames) {
-            if (fold_name(entry.name) != fold_name(name)) {
-                continue;
-            }
-            const auto registered = std::find(state.intercept_vas.begin(),
-                                              state.intercept_vas.end(), entry.function_va);
-            if (registered == state.intercept_vas.end()) {
-                state.intercept_vas.push_back(entry.function_va);
-                state.intercept_ids.push_back(static_cast<std::uint32_t>(id));
-            }
-        }
-        for (const auto& [name, id] : kLdrInterceptNames) {
-            if (fold_name(entry.name) != fold_name(name)) {
-                continue;
-            }
-            const auto registered = std::find(state.intercept_vas.begin(),
-                                              state.intercept_vas.end(), entry.function_va);
-            if (registered == state.intercept_vas.end()) {
-                state.intercept_vas.push_back(entry.function_va);
-                state.intercept_ids.push_back(static_cast<std::uint32_t>(id));
-            }
-        }
-    }
+    // Heap/Ldr family interception, the intercept identity tables, the stub
+    // counting table and the boundary-trap adjudication are decided by
+    // build_run_plan; the state only receives their result below.
     state.fidelity_dispatch = options.windows_fidelity_dispatch;
     // Resolve each intercept's export name and
     // owning region-map module index for event emission. Every loader-route
@@ -196,72 +174,22 @@ assemble_run_state(PreparedGuest& guest, const SyscallRunOptions& options, const
     // hook hot path.
     state.syscall_numbers_by_name = guest_facts.syscall_numbers_by_name;
     state.syscall_names = guest_facts.syscall_names;
-    state.intercept_names.clear();
-    state.intercept_modules.clear();
-    state.stub_slots.clear();
+    state.intercept_names = plan->intercept_names;
+    state.intercept_modules = plan->intercept_modules;
+    state.stub_slots = plan->stub_slots;
     state.stub_entries.clear();
-    const auto module_index_for_va = [&state](const std::uint64_t va) -> std::uint16_t {
-        for (const auto& mod : state.loader_modules) {
-            if (va >= mod.base && va < mod.base + mod.size) {
-                if (state.region_map != nullptr) {
-                    if (const auto idx = state.region_map->module_index_by_name(
-                            fold_name(std::string_view(mod.name.data())));
-                        idx.has_value()) {
-                        return static_cast<std::uint16_t>(*idx);
-                    }
-                }
-                break;
-            }
-        }
-        return 0xFFFF; // kRuntimeIndex: no region-map owner resolved
-    };
-    for (std::size_t i = 0; i < state.intercept_vas.size(); ++i) {
-        const auto va = state.intercept_vas[i];
-        std::string name;
-        for (const auto& entry : state.loader_exports) {
-            if (entry.function_va == va) {
-                name = entry.name;
-                break;
-            }
-        }
-        state.intercept_names.push_back(std::move(name));
-        state.intercept_modules.push_back(module_index_for_va(va));
+    for (const auto& entry : plan->stub_entries) {
+        state.stub_entries.push_back({entry.module, entry.name, 0});
     }
-    if (guest.directory_mode) {
-        // directory mode counts ONLY the explicit whitelist (derived compat
-        // stubs plus fallback synthetic exports) - the "every non-intercepted
-        // export is a stub" inference is a synthetic-mode rule and would
-        // miscount real bodies, data slots, syscall stubs and traps. Alias
-        // names sharing one VA land in one slot: the first whitelist row is
-        // the stable canonical name.
-        for (const auto& entry : guest.stub_whitelist) {
-            if (std::find(state.intercept_vas.begin(), state.intercept_vas.end(),
-                          entry.function_va) != state.intercept_vas.end()) {
-                continue;
-            }
-            if (state.stub_slots.find(entry.function_va) != state.stub_slots.end()) {
-                continue; // shared VA alias: one slot, one count
-            }
-            const auto slot = static_cast<std::uint32_t>(state.stub_entries.size());
-            state.stub_entries.push_back({module_index_for_va(entry.function_va), entry.name, 0});
-            state.stub_slots.emplace(entry.function_va, slot);
-        }
-        state.boundary_trap_vas = guest.boundary_trap_vas;
+    if (plan->directory_mode) {
+        state.boundary_trap_vas = plan->boundary_trap_vas;
         state.boundary_trap_names = guest.boundary_trap_names;
         state.directory_mode = true;
         state.api_set_ctx.mode = loader::ApiSetContext::Mode::kDirectoryMap;
         state.api_set_ctx.directory_map = &guest.api_set_map;
-        for (const auto va : guest.boundary_trap_vas) {
-            // an intercept registration on the same VA supersedes the trap:
-            // the engine answers the call in the hook and the ud2 body is
-            // never reached (the manifest row stays trap-classified; the
-            // interception layer is the engine support landing on it)
-            const auto intercepted =
-                std::find(state.intercept_vas.begin(), state.intercept_vas.end(), va) !=
-                state.intercept_vas.end();
-            if (intercepted) {
-                continue;
-            }
+        // One range-bound code hook per surviving trap VA (the plan already
+        // dropped the VAs an intercept supersedes).
+        for (const auto va : plan->boundary_trap_vas) {
             uc_hook trap_hook = 0;
             const uc_err trap_error =
                 uc_hook_add(guest.unicorn.get(), &trap_hook, UC_HOOK_CODE,
@@ -273,19 +201,8 @@ assemble_run_state(PreparedGuest& guest, const SyscallRunOptions& options, const
                                                          {}});
             }
         }
-    } else {
-        for (const auto& entry : state.loader_exports) {
-            const auto intercepted = std::find(state.intercept_vas.begin(),
-                                               state.intercept_vas.end(), entry.function_va);
-            if (intercepted != state.intercept_vas.end()) {
-                continue; // intercepted exports emit apicall events, not counts
-            }
-            const auto slot = static_cast<std::uint32_t>(state.stub_entries.size());
-            state.stub_entries.push_back({module_index_for_va(entry.function_va), entry.name, 0});
-            state.stub_slots.emplace(entry.function_va, slot);
-        }
     }
-    if (static_cast<bool>(state.stub_sink) && !state.stub_entries.empty()) {
+    if (plan->needs_stub_hooks) {
         for (const auto& mod : state.loader_modules) {
             uc_hook stub_hook = 0;
             const uc_err stub_error = uc_hook_add(guest.unicorn.get(), &stub_hook, UC_HOOK_CODE,
@@ -299,10 +216,8 @@ assemble_run_state(PreparedGuest& guest, const SyscallRunOptions& options, const
             }
         }
     }
-    // loader-route deterministic allocator cursors (zeroed for other routes)
-    const auto& run_layout = layout_for(guest.guest_mode);
-    // Engine dispatch: the trampoline page (int3 marker the callback
-    // return address points at), per-layer scratch for the guest
+    // Engine dispatch: the trampoline page (int3 marker the callback return
+    // address points at), per-layer scratch for the guest
     // EXCEPTION_RECORD/CONTEXT/DISPATCHER_CONTEXT structs, and per-layer
     // callback stacks. Reserved from the front of the deterministic alloc
     // bump range; both dispatch modes map it (only the engine mode consumes
@@ -310,7 +225,7 @@ assemble_run_state(PreparedGuest& guest, const SyscallRunOptions& options, const
     // captured snapshot's committed stack may not extend below the faulting
     // rsp, and a silent staging write to unmapped memory would zero the
     // handler's return address.
-    const auto seh_trampoline = run_layout.alloc_base;
+    const auto seh_trampoline = plan->seh_trampoline;
     const uc_err trampoline_error =
         uc_mem_map(guest.unicorn.get(), seh_trampoline, 0x21000, UC_PROT_ALL);
     if (trampoline_error != UC_ERR_OK) {
@@ -321,10 +236,10 @@ assemble_run_state(PreparedGuest& guest, const SyscallRunOptions& options, const
     }
     const std::uint8_t trampoline_marker = 0xCC; // int3: the INTR hook keys on the rip
     uc_mem_write(guest.unicorn.get(), seh_trampoline, &trampoline_marker, 1);
-    state.seh.trampoline = seh_trampoline;
-    state.seh.scratch = seh_trampoline + 0x1000;
-    state.valloc_cursor = run_layout.alloc_base + 0x21000;
-    state.heap_cursor = run_layout.heap_base;
+    state.seh.trampoline = plan->seh_trampoline;
+    state.seh.scratch = plan->seh_scratch;
+    state.valloc_cursor = plan->valloc_cursor;
+    state.heap_cursor = plan->heap_cursor;
     return {};
 }
 
