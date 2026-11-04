@@ -132,6 +132,11 @@ class SyntheticModuleView final : public capture::ModuleView {
         name = spelled_;
     }
 
+    SyntheticModuleView(const SyntheticModuleView&) = delete;
+    SyntheticModuleView& operator=(const SyntheticModuleView&) = delete;
+    SyntheticModuleView(SyntheticModuleView&&) = delete;
+    SyntheticModuleView& operator=(SyntheticModuleView&&) = delete;
+
     std::expected<capture::ModuleView::Hit, std::string> resolves(std::string_view symbol,
                                                                   std::uint16_t ordinal) override;
 

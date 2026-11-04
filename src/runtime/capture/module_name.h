@@ -9,6 +9,7 @@
 #define SHELLER_CAPTURE_MODULE_NAME_H
 
 #include <cctype>
+#include <cstddef>
 #include <string>
 #include <string_view>
 

@@ -304,7 +304,11 @@ class SystemModuleView final : public ModuleView {
 // The data-file probe is the primary path (search set is exactly the system
 // directory and no code runs); API-set virtual names fail it and fall through
 // to a real system32-only load whose module path is checked back. The handle is
-// released inside acquire - the skeleton never holds a library reference.
+// released inside acquire - the skeleton never holds a library reference. The
+// verified bytes (and their parsed export/import tables) are retained per view
+// for the admission pass: the skeleton may look at a module again while its
+// closure is walked, and the sample's own dependency count is bounded by
+// parse_imports (64 descriptors).
 class SystemModuleSource final : public ModuleSource {
   public:
     ModuleView* acquire(const std::string_view spelled, const std::string_view,

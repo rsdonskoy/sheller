@@ -211,10 +211,12 @@ std::string golden_name(const std::string& arrival)
     return arrival;
 }
 
-// The real-DLL corpus: five samples over kernel32 (the base pair's module,
-// imported but not re-planned), user32, ntdll, kernelbase, plus the production
-// UPX-packed DLL. Every module name and symbol is a real system export; the
-// references cover by-name and by-ordinal.
+// The real-export corpus: seven samples over kernel32 (the base pair's module,
+// imported but not re-planned), user32, ntdll and kernelbase, plus the
+// production UPX-packed DLL. Every module name and symbol is a real system
+// export; the references cover by-name and by-ordinal, and two samples exercise
+// the multi-module BFS order and the per-module symbol walk (a missing first
+// symbol, a second spelling of an already-queued module).
 std::vector<Sample> corpus()
 {
     std::vector<Sample> samples;
@@ -226,6 +228,22 @@ std::vector<Sample> corpus()
     samples.push_back({"ntdll_by_ordinal.dll", make_import_sample({{"ntdll.dll", {{"", 270}}}})});
     samples.push_back(
         {"kernelbase_by_name.dll", make_import_sample({{"kernelbase.dll", {{"CreateFileW", 0}}}})});
+    // Multi-module BFS: one plan entry per direct module in the sample's import
+    // order. The second kernelbase spelling comes after a missing symbol, so the
+    // plan carries the queue's first spelling ("KERNELBASE.dll") - the
+    // documented spelling merge point of the one-algorithm merge.
+    samples.push_back({"multi_module.dll", make_import_sample({
+                                               {"kernel32.dll", {{"GetTickCount", 0}}},
+                                               {"user32.dll", {{"MessageBoxW", 0}}},
+                                               {"ntdll.dll", {{"", 270}}},
+                                               {"KERNELBASE.dll", {{"ShellerNoSuchExport", 0}}},
+                                               {"kernelbase.dll", {{"CreateFileW", 0}}},
+                                           })});
+    // Two references to one module: the first symbol does not exist, so the
+    // selection rule must walk to the second and emit that one.
+    samples.push_back(
+        {"multi_thunk.dll",
+         make_import_sample({{"user32.dll", {{"ShellerNoSuchExport", 0}, {"MessageBoxW", 0}}}})});
     return samples;
 }
 
@@ -332,12 +350,12 @@ TEST(AdmissionDiff, PlanTextMatchesGolden)
 
 // ---- T3: the two routes reject the same corpus ----------------------------
 
-#if defined(_WIN32)
 namespace {
 
 struct RejectSample {
     std::string arrival;
-    std::string expectation;
+    std::string dependency;          // the rejected dependency's spelling
+    std::string windows_expectation; // the capture route's wording fragment
     std::vector<std::uint8_t> bytes;
 };
 
@@ -345,35 +363,56 @@ std::vector<RejectSample> rejection_corpus()
 {
     return {
         // path-shaped dependency name
-        {"path_shape.dll", "path-shaped import name",
+        {"path_shape.dll", "..\\evil.dll", "path-shaped import name",
          make_import_sample({{"..\\evil.dll", {{"GetTickCount", 0}}}})},
         // dependency exists but does not export the referenced symbol
-        {"missing_symbol.dll", "no importable export",
+        {"missing_symbol.dll", "user32.dll", "no importable export",
          make_import_sample({{"user32.dll", {{"ShellerNoSuchExport", 0}}}})},
         // dependency name collides with the sample's arrival name
-        {"USER32.dll", "dependency name collides with the sample",
+        {"USER32.dll", "user32.dll", "dependency name collides with the sample",
          make_import_sample({{"user32.dll", {{"MessageBoxW", 0}}}})},
         // a module no system search can verify
-        {"unknown_module.dll", "not a verifiable system module",
+        {"unknown_module.dll", "sheller_private_module.dll", "not a verifiable system module",
          make_import_sample({{"sheller_private_module.dll", {{"GetTickCount", 0}}}})},
     };
 }
 
 } // namespace
 
+// Portable half: the synthetic route is the only admission Linux has, so its
+// refusal side must be pinned there too (T2 covers its accept side).
+TEST(AdmissionDiff, SynthRouteRejectsTheSameCorpus)
+{
+    for (const auto& sample : rejection_corpus()) {
+        const auto synth =
+            engine::admit_synth_dll_sample(sample.bytes, sample.arrival, synth_module_dir());
+        ASSERT_FALSE(synth.has_value())
+            << "sample: " << sample.arrival << " (synth route accepted)";
+        EXPECT_NE(synth.error().find(sample.dependency), std::string::npos)
+            << "rejection must name the dependency: " << synth.error();
+    }
+}
+
+#if defined(_WIN32)
 TEST(AdmissionDiff, BothRoutesRejectTheSameCorpus)
 {
     for (const auto& sample : rejection_corpus()) {
         const auto windows = capture::admit_dll_sample(sample.bytes, sample.arrival);
         const auto synth =
             engine::admit_synth_dll_sample(sample.bytes, sample.arrival, synth_module_dir());
-        EXPECT_FALSE(windows.has_value())
+        ASSERT_FALSE(windows.has_value())
             << "sample: " << sample.arrival << " (windows route accepted)";
-        EXPECT_FALSE(synth.has_value())
+        ASSERT_FALSE(synth.has_value())
             << "sample: " << sample.arrival << " (synth route accepted)";
-        if (windows.has_value() || synth.has_value()) {
-            ADD_FAILURE() << "expectation: " << sample.expectation;
-        }
+        // The two routes' wording differs by design; each is pinned to its own
+        // reason so a passing test cannot mean "both refused for some other
+        // reason".
+        EXPECT_NE(windows.error().find(sample.dependency), std::string::npos)
+            << "windows rejection must name the dependency: " << windows.error();
+        EXPECT_NE(windows.error().find(sample.windows_expectation), std::string::npos)
+            << "windows rejection must carry its reason: " << windows.error();
+        EXPECT_NE(synth.error().find(sample.dependency), std::string::npos)
+            << "synth rejection must name the dependency: " << synth.error();
     }
 }
 #endif
