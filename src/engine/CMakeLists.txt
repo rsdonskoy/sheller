@@ -49,3 +49,7 @@ target_sources(sheller_engine PRIVATE
   write_ledger.h
   dump_writer.cpp
   dump_writer.h)
+
+# The synthetic admission's test-facing declaration (craft.cpp defines it; the
+# differential admission test drives it directly).
+target_sources(sheller_engine PRIVATE craft_admission.h)

@@ -15,6 +15,7 @@
 // names the dependency.
 
 #include "../../engine/craft.h"
+#include "../../engine/craft_admission.h"
 #include "../../engine/loader_route.h"
 
 #include "../../loader/imports.h"
@@ -123,6 +124,8 @@ bool ordinal_exported(const loader::LoadedModule& module, const std::uint16_t or
     return !(function_rva >= facts.rva && function_rva < facts.rva + facts.size);
 }
 
+} // namespace
+
 // The non-Windows admission: the synthetic module directory is
 // the trusted system world. Same runner plan shape as the Windows admission
 // (base pair first, then one verified symbol per direct dependency, in the
@@ -130,11 +133,13 @@ bool ordinal_exported(const loader::LoadedModule& module, const std::uint16_t or
 // bytes on both platforms. Synth modules import nothing and forward nothing
 // by construction, so the closure is the direct import set plus kernel32 -
 // but every name still resolves through the API-set host rules.
+// Public only so the differential test can drive both routes; the container
+// construction below is its only product caller.
 std::expected<capture::RunnerPlan, std::string>
 admit_synth_dll_sample(const std::vector<std::uint8_t>& sample_bytes,
                        const std::string& arrival_name, const std::filesystem::path& synth_dir,
-                       const std::filesystem::path& system_modules_dir = {},
-                       const bool system_modules_fallback = false)
+                       const std::filesystem::path& system_modules_dir,
+                       const bool system_modules_fallback)
 {
     // The arrival name becomes the runner's path string and the emulated
     // Ldr entry's BaseDllName (bounded to 64 chars there) - enforce one
@@ -394,6 +399,8 @@ admit_synth_dll_sample(const std::vector<std::uint8_t>& sample_bytes,
     }
     return plan;
 }
+
+namespace {
 
 std::expected<std::vector<std::uint8_t>, RebuildFailure>
 serialize_guest(const PreparedGuest& guest, const snapshot::PendingModule* pending)

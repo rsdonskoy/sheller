@@ -79,6 +79,10 @@ struct RunnerPlan {
     WrapArch arch{WrapArch::kX64};
     std::string arrival_name;            // sample file name, UTF-8 (the stub's path string)
     std::vector<RunnerImport> imports{}; // base pair first, then verified system deps
+
+    // The differential admission tests compare the two routes' plans
+    // field-by-field; the member order here is the plan's wire shape.
+    friend constexpr bool operator==(const RunnerPlan&, const RunnerPlan&) = default;
 };
 
 enum class RunnerError {

@@ -1,0 +1,4 @@
+# ntdll_by_ordinal.dll
+kernel32.dll	LoadLibraryW	0
+kernel32.dll	ExitProcess	0
+ntdll.dll		270

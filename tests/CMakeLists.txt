@@ -758,6 +758,24 @@ endif()
   add_dependencies(synth_modules_test synth_modules)
   add_test(NAME synth_modules COMMAND synth_modules_test)
 
+  # Differential admission: the Windows capture route and the synthetic
+  # construction route must answer one corpus with one runner plan. T1/T3 drive
+  # both routes and are Windows-gated in the file; T2's golden check runs
+  # everywhere through the synthetic route (the Linux CI's admission coverage).
+  add_executable(admission_diff_test admission_diff_test.cpp)
+  target_include_directories(admission_diff_test PRIVATE
+    "${CMAKE_CURRENT_SOURCE_DIR}/../src/engine"
+    "${CMAKE_CURRENT_SOURCE_DIR}/../src/runtime/capture")
+  target_compile_definitions(admission_diff_test PRIVATE
+    SYNTH_MODULE_DIR="${SYNTH_MODULE_DIR}"
+    SHELLER_SAMPLE_PACKED_DLL_PATH="${CMAKE_CURRENT_SOURCE_DIR}/packed.dll"
+    ADMISSION_PLAN_DIR="${CMAKE_CURRENT_SOURCE_DIR}/data/admission-plans")
+  target_link_libraries(admission_diff_test
+    PRIVATE GTest::gtest_main sheller_engine sheller_capture)
+  sheller_apply_common(admission_diff_test)
+  add_dependencies(admission_diff_test synth_modules)
+  add_test(NAME admission_diff COMMAND admission_diff_test)
+
   # Boundary description seed (change real-dll-module-dir): the codegen over
   # tools/boundary_manifest/*.json is deterministic, the committed
   # src/engine/boundary_seed.inc stays fresh, and the committed table

@@ -1,0 +1,4 @@
+# packed.dll
+kernel32.dll	LoadLibraryW	0
+kernel32.dll	ExitProcess	0
+USER32.dll	IsCharAlphaA	0
