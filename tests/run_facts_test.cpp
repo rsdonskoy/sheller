@@ -19,6 +19,7 @@
 #include "../src/engine/rebuild_state.h"
 #include "../src/engine/run_facts.h"
 
+#include "fake_ntdll.hpp"
 #include "test_temp.hpp"
 
 #include <sheller/snapshot.h>
@@ -245,6 +246,52 @@ TEST(RunFacts, SampleModuleRecordWithoutAMatchingBase)
     EXPECT_FALSE(facts.sample_module_known);
     EXPECT_EQ(facts.sample_module_index, 0U);
     EXPECT_EQ(facts.sample_image_size, 0U);
+}
+
+// T7 (change run-plan-decision-core): the number -> name map and its inverse
+// are built together from the target ntdll's decodable Nt* stubs; a non-Nt
+// export never enters either table.
+TEST(RunFacts, SyscallNumberAndNameTablesAreInverse)
+{
+    uc_engine* handle = nullptr;
+    ASSERT_EQ(uc_open(UC_ARCH_X86, UC_MODE_64, &handle), UC_ERR_OK);
+    ASSERT_EQ(
+        uc_mem_map(handle, sheller_test::kNtdllBase, sheller_test::kNtdllImageSize, UC_PROT_ALL),
+        UC_ERR_OK);
+    const auto image = sheller_test::build_fake_ntdll();
+    ASSERT_EQ(uc_mem_write(handle, sheller_test::kNtdllBase, image.data(), image.size()),
+              UC_ERR_OK);
+
+    mem_region::ModuleImage module{};
+    module.module.base = sheller_test::kNtdllBase;
+    module.module.size = sheller_test::kNtdllImageSize;
+    std::memcpy(module.module.name.data(), "ntdll", 6);
+    std::vector<mem_region::ModuleImage> images{module};
+    std::vector<mem_region::RegionRecord> regions{};
+    mem_region::MemRegionMap map(images, regions);
+    engine::PreparedGuest guest{engine::UnicornEngine{handle},
+                                engine::GuestMode::kX64,
+                                sheller::snapshot::Metadata{},
+                                std::move(map),
+                                std::move(images),
+                                std::move(regions)};
+    guest.loader_modules = {module.module};
+
+    const auto facts = facts_for(guest);
+    ASSERT_EQ(facts.syscall_numbers_by_name.size(), 2U);
+    ASSERT_EQ(facts.syscall_names.size(), 2U);
+    const auto terminate = facts.syscall_numbers_by_name.find("NtTerminateProcess");
+    ASSERT_NE(terminate, facts.syscall_numbers_by_name.end());
+    EXPECT_EQ(terminate->second, 0x1234U);
+    const auto protect = facts.syscall_numbers_by_name.find("NtProtectVirtualMemory");
+    ASSERT_NE(protect, facts.syscall_numbers_by_name.end());
+    EXPECT_EQ(protect->second, 0x5678U);
+    EXPECT_EQ(facts.syscall_numbers_by_name.count("RtlIdle"), 0U);
+    for (const auto& [name, number] : facts.syscall_numbers_by_name) {
+        const auto inverse = facts.syscall_names.find(number);
+        ASSERT_NE(inverse, facts.syscall_names.end()) << name;
+        EXPECT_EQ(inverse->second, name);
+    }
 }
 
 // A v1 container whose entry address is mapped nowhere: rebuild succeeds (the

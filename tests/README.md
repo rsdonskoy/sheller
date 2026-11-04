@@ -1,8 +1,8 @@
 # tests/
 
 GoogleTest suites plus the synthetic samples, thunks, blobs and golden
-baselines they drive: 77 ctest tests register on a Windows host (measured with
-the run-facts change), 50 on a Linux host (the new portable target registers
+baselines they drive: 78 ctest tests register on a Windows host (measured with
+the run-plan change), 51 on a Linux host (the new portable target registers
 there too). Portable units run on every platform
 and CI job; Windows-only ones need a real capture host (real loader, real
 system DLLs, ml64/nasm toolchain). The Linux side has a local pre-push gate of
@@ -12,13 +12,13 @@ verification gates" below.
 Two of them are the shared-library faces: `shared_api` (direct calls
 through the shared interface library) and `export_surface` (its symbol face
 reconciled against a checked-in list). Two numbers are worth keeping apart when a count is quoted. Locally the whole
-registered set runs (`ctest --preset windows-release` -> 77, Linux -> 50); CI
+registered set runs (`ctest --preset windows-release` -> 78, Linux -> 51); CI
 excludes the corpus-heavy live-capture entries, so its suite is smaller - with
 `-E "event_baseline|exception_e2e|behavior_e2e|loader_byhash_x86_e2e|capture_x86_e2e"`
-Windows runs 72 (measured on the 77-test set), and the same exclusion on Linux
-leaves 49 because only `event_baseline` of those five registers there (the
+Windows runs 73 (measured on the 78-test set), and the same exclusion on Linux
+leaves 50 because only `event_baseline` of those five registers there (the
 Linux reading is the registered set minus that entry, not re-measured).
-Registration is configuration-independent: Windows Debug registers the same 77,
+Registration is configuration-independent: Windows Debug registers the same 78,
 and the new portable target was not re-run in the Debug configuration. The
 Debug `event_baseline` digest golden is stale at HEAD (a clean
 `b5e3828` worktree reproduces the same drifted digests while the Debug product
@@ -86,9 +86,10 @@ for reading these files: the six product names (`analyze` x2, `unpack_sample`,
 | `registry_intercept_e2e_test` | `registry_intercept_e2e` | engine registry interception over the loader route (advapi32 semantics) |
 | `mem_region_map_test` | `mem_region_map` | PE32+ section-table parse (+ SizeOfImage legality) + three-tier attribution queries (hierarchical adjudication: section refinement beats protection-split region fragments); runtime evolution (`register_region`, page-granular `apply_protection` carve with origin/flag inheritance), region classification pure function, stable interval identity keys under split/re-sort; module ownership truth table (overlap / adjacency / orphan) + xfer territory and edge truth tables; unknown-image group synthesis (instoll-shape 8-region chain, chain ordering/no-overlap/capacity self-clamp/determinism) |
 | `native_gate_test` | `native_gate` | loop-native gate: Zydis closed-CFG classification over fixture bytes (accept/reject classes, self-write, exit targets, malformed-stream soundness) + verdict-slot ABI |
-| `syscall_number_map_test` | `syscall_number_map` | ntdll export enumeration + stub-immediate decode; semantic policy dispatch |
+| `syscall_number_map_test` | `syscall_number_map` | ntdll export enumeration + stub-immediate decode; semantic policy dispatch (the synthetic ntdll image builder lives in `fake_ntdll.hpp`, shared with `run_facts`) |
 | `write_ledger_test` | `write_ledger` | page-dirty write ledger (`on_write`, runtime `add_region`) + original-bytes dump export and manifest |
-| `run_facts_test` | `run_facts` | the read-only run-facts layer the run-state assembly consumes: the PEB-derived current directory on the happy path (Windows-only, because the captured separator is a backslash; it also exercises the appended-separator branch) plus its degradation cells (no PEB, null ProcessParameters, odd UNICODE_STRING length, unreadable path buffer, non-absolute path, not a directory - each keeps the guest's own base), the sample module's region-map record on a hit (known/index/SizeOfImage) and its no-match cell, and the assembly-stage failure's raw `uc_err` on a crafted v1 container whose entry address is unmapped - pinned to `UC_ERR_WRITE_UNMAPPED` with every statistic still zero (the entry-byte restore is the first write, so it fails before any state or hook exists; the assertion was proven red against the old zero placeholder) |
+| `run_facts_test` | `run_facts` | the read-only run-facts layer the run-state assembly consumes: the PEB-derived current directory on the happy path (Windows-only, because the captured separator is a backslash; it also exercises the appended-separator branch) plus its degradation cells (no PEB, null ProcessParameters, odd UNICODE_STRING length, unreadable path buffer, non-absolute path, not a directory - each keeps the guest's own base), the sample module's region-map record on a hit (known/index/SizeOfImage) and its no-match cell, the syscall number <-> name tables over the shared fake ntdll (both directions built together, a non-Nt export in neither), and the assembly-stage failure's raw `uc_err` on a crafted v1 container whose entry address is unmapped - pinned to `UC_ERR_WRITE_UNMAPPED` with every statistic still zero (the entry-byte restore is the first write, so it fails before any state or hook exists; the assertion was proven red against the old zero placeholder) |
+| `run_plan_test` | `run_plan` | the run plan's pure decision core over hand-built guests with a null unicorn: alias rows sharing one VA collapse to one stub slot with the first whitelist name, an intercept supersedes a boundary trap on the same VA, directory mode counts only the explicit whitelist while the synthetic mode counts every non-intercepted export, heap/Ldr family names match through `fold_name`, an already-registered VA is never appended twice, the intercept VA's module index resolves inside the module span and falls back to the `0xFFFF` sentinel outside, and the per-mode trampoline/allocator cursors sit on the layout constants with no overlap against the heap, stack and environment ranges (T1-T6 and T8 of the split assessment; each assertion was mutation-proven red) |
 | `behavior_rules_test` | `behavior_rules` | judgment-event emission over synthetic fact sequences: every rule pattern, one event per hit (no dedupe, no capacity cap), the rule fields carried on the wire |
 | `wrapper_test` | `wrapper` | minimal-PE blob construction for bare shellcode |
 | `syscall_bench` | `syscall_bench` | micro-benchmark + red-line gate: syscall chain <= 10 us/call, bare hook cost |

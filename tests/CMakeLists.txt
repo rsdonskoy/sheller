@@ -532,6 +532,19 @@ sheller_apply_common(run_facts_test)
 
 add_test(NAME run_facts COMMAND run_facts_test)
 
+# The run plan's pure decision core (change run-plan-decision-core): the
+# adjudication rules extracted from assemble_run_state, driven over hand-built
+# guests with a null unicorn - portable by design, no capture route.
+add_executable(run_plan_test run_plan_test.cpp)
+target_include_directories(run_plan_test PRIVATE
+  "${CMAKE_CURRENT_SOURCE_DIR}/../src/engine")
+target_include_directories(run_plan_test SYSTEM PRIVATE
+  ${SHELLER_UNICORN_INCLUDE_DIR})
+target_link_libraries(run_plan_test PRIVATE GTest::gtest_main sheller_engine)
+sheller_apply_common(run_plan_test)
+
+add_test(NAME run_plan COMMAND run_plan_test)
+
 # Synthetic DLL load transactions: no host process or system DLL fixtures.
 add_executable(dll_loader_test dll_loader_test.cpp)
 target_include_directories(dll_loader_test PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/../src/engine")
