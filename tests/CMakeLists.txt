@@ -759,9 +759,10 @@ endif()
   add_test(NAME synth_modules COMMAND synth_modules_test)
 
   # Differential admission: the Windows capture route and the synthetic
-  # construction route must answer one corpus with one runner plan. T1/T3 drive
-  # both routes and are Windows-gated in the file; T2's golden check runs
-  # everywhere through the synthetic route (the Linux CI's admission coverage).
+  # construction route must answer one corpus with one runner plan. The
+  # plan-equality and rejection cases drive both routes and are Windows-gated
+  # in the file; the plan-golden case runs everywhere through the synthetic
+  # route (the Linux CI's admission coverage).
   add_executable(admission_diff_test admission_diff_test.cpp)
   target_include_directories(admission_diff_test PRIVATE
     "${CMAKE_CURRENT_SOURCE_DIR}/../src/engine"

@@ -2,7 +2,7 @@
 
 GoogleTest suites plus the synthetic samples, thunks, blobs and golden
 baselines they drive: 79 ctest tests register on a Windows host, 61 on a Linux
-host (both measured with the runner-admission merge; the new portable target
+host (both measured on the current tree; the admission differential target
 registers on both). Portable units run on every platform
 and CI job; Windows-only ones need a real capture host (real loader, real
 system DLLs, ml64/nasm toolchain). The Linux side has a local pre-push gate of
@@ -31,9 +31,9 @@ platforms), the three `SyscallRunGuestSink` cases inside `syscall_e2e` (Windows)
 the installed-prefix consumer under `tests/install-consumer/`, which is deliberately
 **not** a ctest entry - see "Installed-surface checks" below. The esp-law batch
 added the portable `esp_target` suite and the `--stop` faces inside the two CLI
-suites. The runner-admission merge added the portable `admission_diff` suite
-(both platforms): the two admission routes' plans are compared directly, and the
-plan text is frozen in `tests/data/admission-plans/`.
+suites. The portable `admission_diff` suite (both platforms) compares the two
+admission routes' plans directly, and the plan text is frozen in
+`tests/data/admission-plans/`.
 
 ## The two link routes, and which suites sit on which
 
@@ -90,10 +90,10 @@ for reading these files: the six product names (`analyze` x2, `unpack_sample`,
 | `syscall_number_map_test` | `syscall_number_map` | ntdll export enumeration + stub-immediate decode; semantic policy dispatch (the synthetic ntdll image builder lives in `fake_ntdll.hpp`, shared with `run_facts`) |
 | `write_ledger_test` | `write_ledger` | page-dirty write ledger (`on_write`, runtime `add_region`) + original-bytes dump export and manifest |
 | `run_facts_test` | `run_facts` | the read-only run-facts layer the run-state assembly consumes: the PEB-derived current directory on the happy path (Windows-only, because the captured separator is a backslash; it also exercises the appended-separator branch) plus its degradation cells (no PEB, null ProcessParameters, odd UNICODE_STRING length, unreadable path buffer, non-absolute path, not a directory - each keeps the guest's own base), the sample module's region-map record on a hit (known/index/SizeOfImage) and its no-match cell, the syscall number <-> name tables over the shared fake ntdll (both directions built together, a non-Nt export in neither), and the assembly-stage failure's raw `uc_err` on a crafted v1 container whose entry address is unmapped - pinned to `UC_ERR_WRITE_UNMAPPED` with every statistic still zero (the entry-byte restore is the first write, so it fails before any state or hook exists; the assertion was proven red against the old zero placeholder) |
-| `run_plan_test` | `run_plan` | the run plan's pure decision core over hand-built guests with a null unicorn: alias rows sharing one VA collapse to one stub slot with the first whitelist name, an intercept supersedes a boundary trap on the same VA, directory mode counts only the explicit whitelist while the synthetic mode counts every non-intercepted export, heap/Ldr family names match through `fold_name`, an already-registered VA is never appended twice, the intercept VA's module index resolves inside the module span and falls back to the `0xFFFF` sentinel outside, and the per-mode trampoline/allocator cursors sit on the layout constants with no overlap against the heap, stack and environment ranges (T1-T6 and T8 of the split assessment; each assertion was mutation-proven red) |
+| `run_plan_test` | `run_plan` | the run plan's pure decision core over hand-built guests with a null unicorn: alias rows sharing one VA collapse to one stub slot with the first whitelist name, an intercept supersedes a boundary trap on the same VA, directory mode counts only the explicit whitelist while the synthetic mode counts every non-intercepted export, heap/Ldr family names match through `fold_name`, an already-registered VA is never appended twice, the intercept VA's module index resolves inside the module span and falls back to the `0xFFFF` sentinel outside, and the per-mode trampoline/allocator cursors sit on the layout constants with no overlap against the heap, stack and environment ranges (each assertion was mutation-proven red) |
 | `behavior_rules_test` | `behavior_rules` | judgment-event emission over synthetic fact sequences: every rule pattern, one event per hit (no dedupe, no capacity cap), the rule fields carried on the wire |
 | `wrapper_test` | `wrapper` | minimal-PE blob construction for bare shellcode |
-| `admission_diff_test` | `admission_diff` | the two runner-admission routes are one algorithm: T1 drives the Windows capture admission (`capture::admit_dll_sample`) and the synthetic construction admission (`engine::admit_synth_dll_sample`) over the same seven-sample real-export corpus and asserts the plans are equal (`RunnerPlan::operator==`; Windows-gated - the capture route needs real system DLLs). The corpus covers by-name and by-ordinal references, a multi-module BFS (one plan entry per direct module in import order), the per-module symbol walk (a missing first symbol, the next one selected) and the documented first-spelling rule for a module referenced under two spellings. T2 serializes each plan to the module / symbol / ordinal text frozen in `tests/data/admission-plans/*.plan` under the sample's arrival name, and checks it through the synthetic route on **every** platform (Linux CI's admission coverage) plus the capture route on Windows; T3 asserts both routes refuse the same rejection corpus (path-shaped dependency name, missing export, arrival-name collision, unverifiable module), naming the dependency and (per route) its reason, without comparing the two routes' deliberately different wording - the synthetic half also runs on every platform. The fixtures are hand-built x64 PEs with an arbitrary import table, generated in-test. The assessment's over-capacity cell is not reachable from sample bytes - `parse_imports` bounds a sample at 64 module descriptors, so a plan carries at most 66 imports against the 96-entry runner capacity - so the capacity guard has no corpus and the test does not pretend otherwise. The module-name fold (`fold_module_name` / `fold_module_name_equals`) is pinned here too: ASCII-only case folding, non-ASCII bytes pass through, and equal-length comparison |
+| `admission_diff_test` | `admission_diff` | the two runner-admission routes are one algorithm. The plan-equality case drives the Windows capture admission (`capture::admit_dll_sample`) and the synthetic construction admission (`engine::admit_synth_dll_sample`) over the same seven-sample real-export corpus and asserts the plans are equal (`RunnerPlan::operator==`; Windows-gated - the capture route needs real system DLLs). The corpus covers by-name and by-ordinal references, a multi-module BFS (one plan entry per direct module in import order), the per-module symbol walk (a missing first symbol, the next one selected) and the first-spelling rule for a module referenced under two spellings. The golden case serializes each plan to the module / symbol / ordinal text frozen in `tests/data/admission-plans/*.plan` under the sample's arrival name, and checks it through the synthetic route on **every** platform (Linux CI's admission coverage) plus the capture route on Windows. The rejection case asserts both routes refuse the same rejection corpus (path-shaped dependency name, missing export, arrival-name collision, unverifiable module), naming the dependency and (per route) its reason, without comparing the two routes' deliberately different wording - the synthetic half also runs on every platform. The fixtures are hand-built x64 PEs with an arbitrary import table, generated in-test. The over-capacity rejection is not reachable from sample bytes - `parse_imports` bounds a sample at 64 module descriptors, so a plan carries at most 66 imports against the 96-entry runner capacity - so the capacity guard has no corpus and the test does not pretend otherwise. The module-name fold (`fold_module_name` / `fold_module_name_equals`) is pinned here too: ASCII-only case folding, non-ASCII bytes pass through, and equal-length comparison |
 | `syscall_bench` | `syscall_bench` | micro-benchmark + red-line gate: syscall chain <= 10 us/call, bare hook cost |
 | `det_helper` | - (no ctest entry; driven by `dll_capture_e2e`) | resident determinism helper: one replay per invocation over a given container - raw event stream (`[type][seq][pc][payload]` records) to disk through the facade's host observer, exit dump, repair into a `.unp`; no budget and no wall clock, terminated in its stats line only |
 | `event_baseline_test` | `event_baseline` | relocation-normalized event-stream baselines vs goldens: the production event stream (rules + forwarding + one cursor) over the Windows sample set; address-bearing forwarded/judgment payload fields are normalized, the type/order/pc pins remain |
@@ -602,7 +602,7 @@ Measured 2026-10-22 against one mirror (16 MB of source after the excludes):
   between /Od and /O2 links). Regenerate per tree via
   `SHELLER_REGEN_EVENT_BASELINE`.
 
-`data/admission-plans/*.plan` is the runner-admission counterpart: one file per
+`data/admission-plans/*.plan` is the admission counterpart: one file per
 differential-corpus sample (`packed`, `kernel32_by_name`, `user32_by_name`,
 `ntdll_by_ordinal`, `kernelbase_by_name`, `multi_module`, `multi_thunk`), each
 a `# <arrival name>` header and one `module<TAB>symbol<TAB>ordinal` row per plan
@@ -648,10 +648,11 @@ plus the artifact-chain pin
 dump and the repaired `.unp` per process, and the test byte-compares the
 three groups across two helper processes over one container) - all
 WIN32-gated. The admission algorithm those routes share is pinned from the
-other side by `admission_diff` (see the portable table above): T1 compares the
-capture route's plan with the synthetic route's plan, and T2 freezes both in
-`tests/data/admission-plans/*.plan`, so a change that fixes one route and
-forgets the other fails by name instead of silently splitting the corpus.
+other side by `admission_diff` (see the portable table above): the plan-equality
+case compares the capture route's plan with the synthetic route's plan, and the
+golden case freezes both in `tests/data/admission-plans/*.plan`, so a fix to one
+route that forgets the other fails by name instead of silently splitting the
+corpus.
 `dll_capture_e2e` stays excluded from shared CI runners: the
 old runner-hardware crash past the OEP was steered by the captured world's
 per-process entropy (the virtual-TSC answer leaked host stack into its high

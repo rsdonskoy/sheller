@@ -1,23 +1,22 @@
 // Differential admission tests: the two runner-admission implementations -
 // the Windows capture route (capture::admit_dll_sample) and the synthetic
 // construction route (engine::admit_synth_dll_sample) - are one algorithm with
-// one plan per corpus. This file is the safety net for that claim.
+// one plan per corpus. This file pins that claim three ways:
 //
-//   T1  the same corpus through both routes yields equal plans (Windows only:
-//       the capture route needs real LoadLibraryExW and real system DLLs)
-//   T2  the plan text (module / symbol / ordinal, in generation order) is
-//       frozen against tests/data/admission-plans/*.plan; the synthetic route
-//       is checked on every platform, which is the Linux CI's admission
-//       coverage
-//   T3  the rejection corpus (path-shaped name, missing symbol, collision with
-//       the sample, unverifiable module) is refused by both routes; the two
-//       routes' wording is deliberately different and is not compared
+//   - the same corpus through both routes yields equal plans (Windows only:
+//     the capture route needs real LoadLibraryExW and real system DLLs);
+//   - the plan text (module / symbol / ordinal, in generation order) is frozen
+//     against tests/data/admission-plans/*.plan; the synthetic route is checked
+//     on every platform, which is the Linux CI's admission coverage;
+//   - the rejection corpus (path-shaped name, missing symbol, collision with
+//     the sample, unverifiable module) is refused by both routes; the two
+//     routes' wording is deliberately different and is not compared.
 //
-// The over-capacity cell of the assessment's T3 cannot be reached from sample
-// bytes: capture::parse_imports bounds a sample at 64 module descriptors, so a
-// plan carries at most 66 imports against a 96-entry runner capacity. The
-// capacity check survives in the shared admission code as a guard; there is no
-// corpus that drives it, and this file does not pretend otherwise.
+// The over-capacity rejection cannot be reached from sample bytes:
+// capture::parse_imports bounds a sample at 64 module descriptors, so a plan
+// carries at most 66 imports against a 96-entry runner capacity. The capacity
+// check survives in the shared admission code as a guard; there is no corpus
+// that drives it, and this file does not pretend otherwise.
 //
 // The fixture is a minimal x64 PE carrying an arbitrary import table: the
 // admission reads the sample's import directory from file bytes and never maps
@@ -230,8 +229,8 @@ std::vector<Sample> corpus()
         {"kernelbase_by_name.dll", make_import_sample({{"kernelbase.dll", {{"CreateFileW", 0}}}})});
     // Multi-module BFS: one plan entry per direct module in the sample's import
     // order. The second kernelbase spelling comes after a missing symbol, so the
-    // plan carries the queue's first spelling ("KERNELBASE.dll") - the
-    // documented spelling merge point of the one-algorithm merge.
+    // plan carries the queue's first spelling ("KERNELBASE.dll") - the plan's
+    // first-spelling rule for a module referenced under two spellings.
     samples.push_back({"multi_module.dll", make_import_sample({
                                                {"kernel32.dll", {{"GetTickCount", 0}}},
                                                {"user32.dll", {{"MessageBoxW", 0}}},
@@ -293,7 +292,7 @@ TEST(AdmissionFold, ComparesFoldedNamesWithoutMaterializingOne)
     EXPECT_FALSE(capture::fold_module_name_equals("user32.dll", "user32.dll "));
 }
 
-// ---- T1: both routes, one plan -------------------------------------------
+// ---- both routes, one plan -----------------------------------------------
 
 #if defined(_WIN32)
 TEST(AdmissionDiff, BothRoutesProduceTheSamePlan)
@@ -308,7 +307,7 @@ TEST(AdmissionDiff, BothRoutesProduceTheSamePlan)
 }
 #endif
 
-// ---- T2: the plan text is frozen -----------------------------------------
+// ---- the plan text is frozen ---------------------------------------------
 
 TEST(AdmissionDiff, PlanTextMatchesGolden)
 {
@@ -327,7 +326,8 @@ TEST(AdmissionDiff, PlanTextMatchesGolden)
         const std::string text = serialize_plan(*synth);
 #if defined(_WIN32)
         // The capture route's plan is the production plan; the golden pins
-        // that route's content too (T1 already pins it to the synthetic one).
+        // that route's content too (the equality case pins it to the synthetic
+        // route's plan).
         const auto windows = windows_plan(sample);
         ASSERT_TRUE(windows.has_value()) << sample.arrival << ": " << windows.error();
         EXPECT_EQ(serialize_plan(*windows), text) << "sample: " << sample.arrival;
@@ -348,7 +348,7 @@ TEST(AdmissionDiff, PlanTextMatchesGolden)
     }
 }
 
-// ---- T3: the two routes reject the same corpus ----------------------------
+// ---- the two routes reject the same corpus -------------------------------
 
 namespace {
 
@@ -380,7 +380,8 @@ std::vector<RejectSample> rejection_corpus()
 } // namespace
 
 // Portable half: the synthetic route is the only admission Linux has, so its
-// refusal side must be pinned there too (T2 covers its accept side).
+// refusal side must be pinned there too (the golden case covers its accept
+// side).
 TEST(AdmissionDiff, SynthRouteRejectsTheSameCorpus)
 {
     for (const auto& sample : rejection_corpus()) {
