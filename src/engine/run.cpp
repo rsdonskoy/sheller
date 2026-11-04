@@ -92,10 +92,12 @@ std::expected<void, SyscallRunFailure> assemble_run_state(PreparedGuest& guest,
     // The syscall run executes the sample's real code, so the entry spin the
     // capture path wrote must go: restore the original bytes from the
     // snapshot metadata before the guest starts.
-    if (uc_mem_write(guest.unicorn.get(), guest.metadata.entry_address,
-                     guest.metadata.original_entry_bytes.data(),
-                     guest.metadata.original_entry_bytes.size()) != UC_ERR_OK) {
-        return std::unexpected(SyscallRunFailure{SyscallRunError::kUnicornFailure, {}, {}, {}});
+    const uc_err restore_error = uc_mem_write(guest.unicorn.get(), guest.metadata.entry_address,
+                                              guest.metadata.original_entry_bytes.data(),
+                                              guest.metadata.original_entry_bytes.size());
+    if (restore_error != UC_ERR_OK) {
+        return std::unexpected(SyscallRunFailure{
+            SyscallRunError::kUnicornFailure, static_cast<std::uint32_t>(restore_error), {}, {}});
     }
 
     state.policy = syscalls::PolicyTable{};
@@ -306,11 +308,14 @@ std::expected<void, SyscallRunFailure> assemble_run_state(PreparedGuest& guest,
                 continue;
             }
             uc_hook trap_hook = 0;
-            if (uc_hook_add(guest.unicorn.get(), &trap_hook, UC_HOOK_CODE,
-                            reinterpret_cast<void*>(on_boundary_trap), &state, va,
-                            va) != UC_ERR_OK) {
-                return std::unexpected(
-                    SyscallRunFailure{SyscallRunError::kUnicornFailure, {}, {}, {}});
+            const uc_err trap_error =
+                uc_hook_add(guest.unicorn.get(), &trap_hook, UC_HOOK_CODE,
+                            reinterpret_cast<void*>(on_boundary_trap), &state, va, va);
+            if (trap_error != UC_ERR_OK) {
+                return std::unexpected(SyscallRunFailure{SyscallRunError::kUnicornFailure,
+                                                         static_cast<std::uint32_t>(trap_error),
+                                                         {},
+                                                         {}});
             }
         }
     } else {
@@ -328,11 +333,14 @@ std::expected<void, SyscallRunFailure> assemble_run_state(PreparedGuest& guest,
     if (static_cast<bool>(state.stub_sink) && !state.stub_entries.empty()) {
         for (const auto& mod : state.loader_modules) {
             uc_hook stub_hook = 0;
-            if (uc_hook_add(guest.unicorn.get(), &stub_hook, UC_HOOK_CODE,
-                            reinterpret_cast<void*>(on_stub_code), &state, mod.base,
-                            mod.base + mod.size) != UC_ERR_OK) {
-                return std::unexpected(
-                    SyscallRunFailure{SyscallRunError::kUnicornFailure, {}, {}, {}});
+            const uc_err stub_error = uc_hook_add(guest.unicorn.get(), &stub_hook, UC_HOOK_CODE,
+                                                  reinterpret_cast<void*>(on_stub_code), &state,
+                                                  mod.base, mod.base + mod.size);
+            if (stub_error != UC_ERR_OK) {
+                return std::unexpected(SyscallRunFailure{SyscallRunError::kUnicornFailure,
+                                                         static_cast<std::uint32_t>(stub_error),
+                                                         {},
+                                                         {}});
             }
         }
     }
@@ -348,8 +356,13 @@ std::expected<void, SyscallRunFailure> assemble_run_state(PreparedGuest& guest,
     // rsp, and a silent staging write to unmapped memory would zero the
     // handler's return address.
     const auto seh_trampoline = run_layout.alloc_base;
-    if (uc_mem_map(guest.unicorn.get(), seh_trampoline, 0x21000, UC_PROT_ALL) != UC_ERR_OK) {
-        return std::unexpected(SyscallRunFailure{SyscallRunError::kUnicornFailure, {}, {}, {}});
+    const uc_err trampoline_error =
+        uc_mem_map(guest.unicorn.get(), seh_trampoline, 0x21000, UC_PROT_ALL);
+    if (trampoline_error != UC_ERR_OK) {
+        return std::unexpected(SyscallRunFailure{SyscallRunError::kUnicornFailure,
+                                                 static_cast<std::uint32_t>(trampoline_error),
+                                                 {},
+                                                 {}});
     }
     const std::uint8_t trampoline_marker = 0xCC; // int3: the INTR hook keys on the rip
     uc_mem_write(guest.unicorn.get(), seh_trampoline, &trampoline_marker, 1);
