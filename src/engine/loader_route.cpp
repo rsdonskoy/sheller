@@ -239,7 +239,7 @@ load_real_module(const std::vector<std::uint8_t>& bytes, const std::string_view 
     return {};
 }
 
-// Directory mode (change real-dll-module-dir): the strict source tiers. The
+// Directory mode: the strict source tiers. The
 // boundary pair derives from the directory files under the committed
 // manifest (ntdll required, win32u optional), every other directory DLL
 // maps as real bytes, the API Set map is required and anchored to the raw
@@ -251,10 +251,10 @@ std::expected<LoadedSystemModules, RebuildFailure> load_directory_system_modules
     const GuestMode mode, const std::filesystem::path& dir, const bool fallback_enabled,
     const std::filesystem::path& synthetic_module_dir, std::vector<std::uint8_t>& image)
 {
-    // Phase 1 derives the x64 boundary pair only (design Non-Goals).
+    // The derivation covers the x64 boundary pair only (no x86 images here).
     if (mode != GuestMode::kX64) {
-        return std::unexpected(failure(RebuildError::kBadSnapshot,
-                                       "system-modules directory mode is x64-only in this phase"));
+        return std::unexpected(
+            failure(RebuildError::kBadSnapshot, "system-modules directory mode is x64-only"));
     }
     std::error_code probe_ec;
     if (!std::filesystem::is_directory(dir, probe_ec) || probe_ec) {
@@ -268,7 +268,7 @@ std::expected<LoadedSystemModules, RebuildFailure> load_directory_system_modules
     };
 
     // The API Set map is required and anchored to the directory's own raw
-    // ntdll (design D5) - the boundary derivation binds to the same hash.
+    // ntdll - the boundary derivation binds to the same hash.
     const auto map_bytes = read_file_bytes(dir_file("apiset-map.bin"));
     if (!map_bytes.has_value()) {
         return std::unexpected(
@@ -348,7 +348,7 @@ std::expected<LoadedSystemModules, RebuildFailure> load_directory_system_modules
         }
         module.image = std::move(*guest_image);
         // the derived ntdll carries the independent mode marker in its
-        // reserved DOS e_res2 slot (design D6) - part of the generated
+        // reserved DOS e_res2 slot - part of the generated
         // image contract, written before any map bytes exist
         if (module_name == "ntdll.dll") {
             if (const auto marked =
@@ -1512,11 +1512,11 @@ prepare_pe_file(const std::filesystem::path& path, bool fidelity_seams,
     // registrations, the counting whitelist and the complete embedded API
     // Set map. Read-only MEM_PRIVATE region, no host paths, capacity-capped
     // at encode time. The e_res2 marker the derived ntdll carries points
-    // here; the replay-side bilateral check reads both (design D6).
+    // here; the replay-side bilateral check reads both.
     if (!system_modules_dir.empty()) {
         namespace bm = boundary_metadata;
         bm::MetadataInput meta;
-        // the counting whitelist (event-ledger source rules): derived compat
+        // the counting whitelist (the ledger's source rules): derived compat
         // entries plus every fallback synthetic module's exports; trap
         // dispositions join the named stop points (klass 255 rows keep the
         // trap names in the record without joining the count set)
@@ -2066,7 +2066,7 @@ reattach_tables_from_images(PreparedGuest& guest, const loader::ApiSetContext* a
     return {};
 }
 
-// The directory-mode replay attach (design D6): the same registration logic
+// The directory-mode replay attach: the same registration logic
 // the construction used - the tables rebuild from the guest's own images
 // through reattach_tables_from_images, the API Set map reloads from the
 // embedded record, the source table and boundary rules restore from the

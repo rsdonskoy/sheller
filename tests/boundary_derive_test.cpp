@@ -1,4 +1,4 @@
-// Boundary derivation (change real-dll-module-dir, tasks 1.1/1.2): the pure
+// Boundary derivation: the pure
 // byte-level function from a directory file to the stub image - syscall
 // numbers validated in the source body (never by name prefix), names,
 // ordinals, aliases and forwarders preserved, EAT addresses rebuilt, the
@@ -247,7 +247,7 @@ TEST(BoundaryDerive, NamedRejections)
     EXPECT_EQ(unknown.error().code, BoundaryDeriveError::kUnknownExport);
     EXPECT_NE(unknown.error().detail.find("NtUnknown"), std::string::npos);
 
-    // i386 boundary images are not derived in phase 1 (consistent PE32
+    // i386 boundary images are not derived (consistent PE32
     // headers: machine and magic flipped together)
     auto x86_source = make_boundary_source(boundary_fixture_exports(false));
     x86_source[0x84] = 0x4C; // machine i386

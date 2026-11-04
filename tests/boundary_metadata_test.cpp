@@ -1,4 +1,4 @@
-// Boundary metadata codec (change real-dll-module-dir, task 4.1): the
+// Boundary metadata codec: the
 // versioned payload encodes deterministically (same input, byte-identical
 // bytes), rejects an over-capacity payload by name instead of truncating,
 // validates magic/version/checksum/ranges on decode, and the DOS e_res2

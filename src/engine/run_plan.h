@@ -73,11 +73,10 @@ struct RunPlan {
 };
 
 // Pure: reads the guest's construction tables and writes nothing. The facts
-// parameter is reserved for the apply split's decision inputs (this core needs
-// none of them yet), so it is deliberately unused. The decision core is total
-// today (every rule has a defined answer), so the failure channel carries no
-// producer yet - it is the signature the apply split (later slice) continues
-// with.
+// parameter is reserved for the decision inputs the apply stage will need (this
+// core needs none of them yet), so it is deliberately unused. The decision core
+// is total today (every rule has a defined answer), so the failure channel
+// carries no producer yet - the apply stage continues with it.
 std::expected<RunPlan, SyscallRunFailure> build_run_plan(const PreparedGuest& guest,
                                                          const GuestFacts& facts,
                                                          const SyscallRunOptions& options);

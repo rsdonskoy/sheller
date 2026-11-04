@@ -1,8 +1,8 @@
 # API Set map text sources
 
 One JSON file per (module, architecture) - the reviewed offline source the
-`apiset-map.bin` binary is generated from (`tools/gen_apiset_map.py`,
-design D5, change `real-dll-module-dir`). The binary travels inside the
+`apiset-map.bin` binary is generated from (`tools/gen_apiset_map.py`).
+The binary travels inside the
 user's system-module directory next to its raw ntdll; the engine reads only
 the binary, through a bounded reader that rejects a map whose architecture
 or anchor differs from the world.

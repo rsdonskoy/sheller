@@ -1,7 +1,6 @@
-// The boundary description manifest's runtime face (design D2, change
-// real-dll-module-dir): the committed seed table is the only manifest the
-// engine sees - applicability is a named (module, arch, image-xxhash64)
-// verdict, seed rows map one-to-one onto loader::BoundaryRule vectors, and
+// The boundary description manifest's runtime face: the committed seed
+// table is the only manifest the engine sees - applicability is a named (module, arch,
+// image-xxhash64) verdict, seed rows map one-to-one onto loader::BoundaryRule vectors, and
 // forwarded boundary exports classify along their resolution chain to the
 // target's disposition. Pure data + queries: no unicorn, no filesystem.
 

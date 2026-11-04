@@ -3,7 +3,7 @@
 // no system PE header (only <elf.h>), so the few needed structures are
 // mirrored here field-for-field from winnt.h and pinned with static_asserts;
 // parsing casts the buffer onto them, the way winnt.h-based tools do.
-// Full image parsing with peconv lands in a later slice.
+// Full image parsing with peconv is not implemented here.
 
 #ifndef SHELLER_CAPTURE_PE_HEADERS_H
 #define SHELLER_CAPTURE_PE_HEADERS_H

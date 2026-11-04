@@ -91,7 +91,7 @@ assemble_run_state(PreparedGuest& guest, const SyscallRunOptions& options, const
 {
     // The orchestration: decide once (pure), then apply with the original
     // write order. The two halves are separate functions so the split's
-    // boundary is visible at the call site (change run-state-apply-split).
+    // boundary is visible at the call site.
     auto plan = build_run_plan(guest, guest_facts, options);
     if (!plan) {
         return std::unexpected(std::move(plan.error()));

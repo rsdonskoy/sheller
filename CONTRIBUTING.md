@@ -87,7 +87,7 @@ docs/              cli.md (the command line) and embedding.md (linking the libra
 ## Commits and pull requests
 
 - Conventional Commits: English imperative + module scope (`engine:`, `cli:`, ...)
-- one PR = one milestone slice; the description must address that slice's acceptance items
+- one PR = one coherent slice; the description must address that slice's acceptance items
 - PRs touching the event stream or the dump path must include a baseline comparison
 - real malware samples never enter the repository: corpora are synthetic only, private
   collections are mounted from a local directory

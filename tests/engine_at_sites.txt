@@ -7,11 +7,10 @@
 # one free (that is what this table used to count, and it was measured green while a
 # registered file went from 1 to 2).
 #
-# Baseline taken with the classification in
-# openspec/changes/embedder-hardening/audit-at-sites.md (38 sites; the audit lists
-# them one per line, so its 38 entries and this table's 38 occurrences are the same
-# count today - no line in these five files holds two).
-# No file may go up without a decision in that audit first: a guest-controlled index
+# Baseline taken with the per-site classification (38 sites; the classification
+# lists them one per line, so its 38 entries and this table's 38 occurrences are
+# the same count today - no line in these five files holds two).
+# No file may go up without a classification decision first: a guest-controlled index
 # is supposed to get an explicit check plus the file's own failure channel, not a new
 # .at() and not a bigger number here.
 src/behavior/behavior_rules.cpp 1

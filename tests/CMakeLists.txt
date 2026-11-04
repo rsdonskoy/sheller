@@ -517,7 +517,7 @@ sheller_apply_common(write_ledger_test)
 
 add_test(NAME write_ledger COMMAND write_ledger_test)
 
-# Read-only run facts (change assemble-run-state-facts): the PEB-derived cwd
+# Read-only run facts: the PEB-derived cwd
 # and its degradation cells, the sample module's region-map record, and the
 # assembly-stage failure's raw uc_err - portable by design (one hand-built
 # guest plus one crafted v1 container, no capture route); the cwd happy path
@@ -532,7 +532,7 @@ sheller_apply_common(run_facts_test)
 
 add_test(NAME run_facts COMMAND run_facts_test)
 
-# The run plan's pure decision core (change run-plan-decision-core): the
+# The run plan's pure decision core: the
 # adjudication rules extracted from assemble_run_state, driven over hand-built
 # guests with a null unicorn - portable by design, no capture route.
 add_executable(run_plan_test run_plan_test.cpp)
@@ -684,8 +684,7 @@ if(WIN32)
   set_tests_properties(dll_capture_e2e PROPERTIES
     WORKING_DIRECTORY "$<TARGET_FILE_DIR:sheller>")
 
-  # Resident artifact-chain determinism helper (captured-world-determinism
-  # task 3.2): one replay per invocation - raw event stream to disk, exit
+  # Resident artifact-chain determinism helper: one replay per invocation - raw event stream to disk, exit
   # dump, repair into a .unp. The dll_capture_e2e pin drives two independent
   # helper processes over one container and byte-compares the artifacts.
   add_executable(det_helper det_helper.cpp)
@@ -777,7 +776,7 @@ endif()
   add_dependencies(admission_diff_test synth_modules)
   add_test(NAME admission_diff COMMAND admission_diff_test)
 
-  # Boundary description seed (change real-dll-module-dir): the codegen over
+  # Boundary description seed: the codegen over
   # tools/boundary_manifest/*.json is deterministic, the committed
   # src/engine/boundary_seed.inc stays fresh, and the committed table
   # compiles standalone with the pinned fixture-image binding.
@@ -793,7 +792,7 @@ endif()
   sheller_apply_common(boundary_seed_test)
   add_test(NAME boundary_seed COMMAND boundary_seed_test)
 
-  # Boundary manifest binding (change real-dll-module-dir): the committed
+  # Boundary manifest binding: the committed
   # seed's applicability verdicts are named rejections, the seed rows drive
   # the derive end-to-end, and forwarded exports classify along the chain.
   add_executable(boundary_manifest_test boundary_manifest_test.cpp)
@@ -804,7 +803,7 @@ endif()
   sheller_apply_common(boundary_manifest_test)
   add_test(NAME boundary_manifest COMMAND boundary_manifest_test)
 
-  # Boundary metadata codec (change real-dll-module-dir): deterministic
+  # Boundary metadata codec: deterministic
   # encode, the named over-limit rejection, damage-by-name decode
   # rejections, and the DOS e_res2 marker round trip.
   add_executable(boundary_metadata_test boundary_metadata_test.cpp)
@@ -814,7 +813,7 @@ endif()
   sheller_apply_common(boundary_metadata_test)
   add_test(NAME boundary_metadata COMMAND boundary_metadata_test)
 
-  # API Set map (change real-dll-module-dir): generator determinism, the
+  # API Set map: generator determinism, the
   # bounded reader's named rejections, and the explicit context resolving
   # directory maps while the synthetic prefix route stays unchanged.
   add_executable(apiset_map_test apiset_map_test.cpp)
@@ -829,7 +828,7 @@ endif()
   sheller_apply_common(apiset_map_test)
   add_test(NAME apiset_map COMMAND apiset_map_test)
 
-  # Directory-mode loader route (change real-dll-module-dir): the strict
+  # Directory-mode loader route: the strict
   # source tiers over a user directory - derived boundary pair, real-byte
   # modules, required anchored API Set map, named closure rejections, the
   # marked synthetic fallback, and the untouched synthetic route.
@@ -1020,8 +1019,8 @@ if(WIN32)
   # __CxxFrameHandler4 path runs the real vcruntime140(_1).dll guest code.
   # Corpus contract: /MD + /GS- in every config; the optimization shape
   # follows the build config - Debug builds the diagnosed /Od + /RTC1 shape
-  # (the engine C++ unwind misattributed establisher frames exactly there,
-  # see OPENSPEC-BACKLOG "C++ EH corpus shape") and release configs keep the
+  # (the engine C++ unwind misattributed establisher frames exactly there)
+  # and release configs keep the
   # /O2 baseline. exception_e2e pins both shapes through its two configs.
   add_executable(capture_cpp_eh_sample capture_cpp_eh_sample.cpp capture_seh_thunks.asm)
   set_target_properties(capture_cpp_eh_sample PROPERTIES LINKER_LANGUAGE CXX
@@ -1188,7 +1187,7 @@ sheller_apply_common(loader_test)
 
 add_test(NAME loader COMMAND loader_test)
 
-# Boundary derivation (change real-dll-module-dir): the pure byte-level
+# Boundary derivation: the pure byte-level
 # directory-file -> stub-image function - syscall numbers validated in the
 # source body, names/ordinals/aliases/forwarders preserved, EAT rebuilt,
 # weld-slot and marker-slot layout, double-derive determinism, named
@@ -1441,7 +1440,7 @@ sheller_apply_common(guest_sink_guard_test)
 
 add_test(NAME guest_sink_guard COMMAND guest_sink_guard_test)
 
-# ESP-law stop target (change esp-law-oep): crafted save/restore corpora
+# ESP-law stop target: crafted save/restore corpora
 # drive the engine entry directly through the public run_snapshot_syscalls -
 # portable by design (crafted snapshots, no capture route), with the two
 # stop forms, the anti-debug rejection, the silent cells and the probe-leg
@@ -1485,7 +1484,7 @@ add_test(NAME engine_trace COMMAND engine_trace_test --traces-on
 add_test(NAME engine_trace_quiet COMMAND engine_trace_test
          "--gtest_filter=-EngineTraceNoSink.*")
 # The third cell of the triple gate: switches set and no host sink installed, which is
-# the combination the batch argues about (the environment is the face an attacker can
+# the combination that matters (the environment is the face an attacker can
 # reach). Only the one case runs here; engine_trace_test's main() fails the entry if it
 # did not run, so a filter that stops matching cannot read as a green test.
 add_test(NAME engine_trace_nosink COMMAND engine_trace_test --traces-on --no-sink

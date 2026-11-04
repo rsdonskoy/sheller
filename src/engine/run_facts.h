@@ -1,7 +1,7 @@
 // Read-only run facts: the guest probes the syscall run's state assembly needs,
 // gathered once before anything is written. Every field is a plain value, so a
 // later plan stage can be a pure function over them (no unicorn handle, no
-// state, no writes) - the first slice of the assemble_run_state split.
+// state, no writes).
 //
 // The probes here only read: guest memory for the PEB-derived current
 // directory and the ntdll syscall stubs, the region map for the sample's own

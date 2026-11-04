@@ -47,7 +47,7 @@ Generated copies land in the temp dir below and are removed when the round ends,
 together with the empty directory cases c and c2 create in WSL. An injected run
 shares the gate's mirror target, so run it while no leg is in flight. Exit status is
 0 only when every case behaved as required. Like the gate scripts themselves,
-this one is coupled to the machine recorded in HANDOFF (drvfs at /mnt/devdrive).
+this one is coupled to this machine (drvfs at /mnt/devdrive).
 """
 
 import pathlib

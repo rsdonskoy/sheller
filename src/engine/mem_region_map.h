@@ -183,7 +183,7 @@ enum class PeParseError {
     kNone = 0,
     kBadDos,       // missing MZ signature or e_lfanew out of range
     kBadPe,        // missing PE signature or headers truncated
-    kNotPe32Plus,  // not a PE32+ image (x86 images are a later slice)
+    kNotPe32Plus,  // not a PE32+ image (x86 images are not supported)
     kTruncated,    // section table extends past the input
     kBadImageSize, // SizeOfImage outside [1, 4GB)
 };

@@ -353,14 +353,14 @@ analyze_bytes_impl(const std::vector<std::uint8_t>& input, const AnalysisOptions
         return std::unexpected(capture_failure(
             capture::Status::kNotX64Pe,
             snapshot_magic ? "input carries the snapshot magic but sample routing was selected"
-                           : "sample bytes are not accepted by this batch (the bytes entry "
+                           : "sample bytes are not accepted here (the bytes entry "
                              "takes snapshot bytes only; capture and the loader take paths)"));
     case AnalysisInputKind::kAuto:
     default:
         if (!snapshot_magic) {
             return std::unexpected(capture_failure(
                 capture::Status::kCaptureFailed,
-                "sample bytes are not accepted by this batch (the bytes entry takes snapshot "
+                "sample bytes are not accepted here (the bytes entry takes snapshot "
                 "bytes only; capture and the loader take paths)"));
         }
         break;

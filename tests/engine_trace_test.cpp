@@ -226,10 +226,10 @@ bool no_sink_mode = false;     // decided by argv in main(), before the first ca
 bool no_sink_case_ran = false; // what main() checks, so a filter cannot empty this run
 
 // Environment on and no host sink installed: the library stays silent on both of the
-// host's standard streams. This is the combination the change argues about - the
-// environment is the face of a library that an attacker can reach - and until now no
-// run of this binary put those two conditions together, because every case above calls
-// install_sink() before it runs anything. It has to be its own process: the switches
+// host's standard streams. This is the combination that matters - the environment is
+// the face of a library that an attacker can reach - and no other run of this binary
+// puts those two conditions together, because every case above calls install_sink()
+// before it runs anything. It has to be its own process: the switches
 // are read once per process, and the second half of the case below installs a sink to
 // prove the sites were live.
 //

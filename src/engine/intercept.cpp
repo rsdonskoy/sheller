@@ -667,7 +667,7 @@ void intercept_ldr_load_dll(SyscallRunState& state)
     // short-circuit killed the ucrtbase AppPolicy delay-load of
     // kernel.appcore.dll at its FIRST (api-set) attempt, forcing the fallback
     // full-path load whose KnownDll-probe failure ends in the WER report
-    // path (the NtAlpcConnectPort this change was filed for). The LOADER
+    // path (built on NtAlpcConnectPort). The LOADER
     // route keeps the answer: its synthetic Ldr dies in real load-path
     // cleanup (the reason this intercept exists).
     if (!state.loader_route) {

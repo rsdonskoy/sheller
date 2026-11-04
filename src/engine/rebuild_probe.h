@@ -34,7 +34,7 @@ rebuild_and_probe(const std::filesystem::path& snapshot_path);
 
 // Attribution probe: the enumerated module images, the snapshot regions,
 // and the real syscall numbers resolved from the guest ntdll stubs, for the
-// mem-region-map and syscall-number-resolution e2e tests.
+// region-map and syscall-number e2e tests.
 struct ExportSlotProbe {
     std::uint64_t module_base{}; // owning module (join against images)
     std::uint64_t slot_va{};     // functions-array entry a walking reader touches

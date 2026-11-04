@@ -1,4 +1,4 @@
-// Read-only run facts (change assemble-run-state-facts): the guest probes the
+// Read-only run facts: the guest probes the
 // syscall run's state assembly needs, taken before anything is written.
 //
 // Faces pinned here:
@@ -10,7 +10,7 @@
 //    a hit, and the "no such module" cell;
 //  - the assembly-stage failure code: a container whose entry address is not
 //    mapped fails the entry-byte restore, and the failure carries that
-//    uc_err instead of a zero placeholder (the behavior this change adds).
+//    uc_err instead of a zero placeholder (the behavior pinned here).
 //
 // Portable by design: the facts cases build one guest by hand, and the
 // failure case is a crafted v1 snapshot - no capture route, no corpus.
@@ -248,7 +248,7 @@ TEST(RunFacts, SampleModuleRecordWithoutAMatchingBase)
     EXPECT_EQ(facts.sample_image_size, 0U);
 }
 
-// T7 (change run-plan-decision-core): the number -> name map and its inverse
+// The number -> name map and its inverse
 // are built together from the target ntdll's decodable Nt* stubs; a non-Nt
 // export never enters either table.
 TEST(RunFacts, SyscallNumberAndNameTablesAreInverse)

@@ -1,10 +1,10 @@
-// The run plan's pure decision core (change run-plan-decision-core): every case
+// The run plan's pure decision core: every case
 // drives build_run_plan over a hand-built PreparedGuest with a NULL unicorn -
 // the plan never touches the engine, which is exactly the property under test.
-// T1-T6 pin the adjudication rules that used to live in assemble_run_state
-// between write side effects; T8 pins the per-mode cursor layout. T7 (the
-// syscall number <-> name inverse) lives with the facts layer it belongs to:
-// see run_facts_test's SyscallNumberAndNameTablesAreInverse.
+// The cases pin the adjudication rules that used to live in assemble_run_state
+// between write side effects, and the per-mode cursor layout. The syscall
+// number <-> name inverse lives with the facts layer it belongs to: see
+// run_facts_test's SyscallNumberAndNameTablesAreInverse.
 //
 // Portable by design: no capture route, no corpus, no guest memory.
 
@@ -91,7 +91,7 @@ constexpr std::uint32_t id_of(const engine::InterceptId id)
     return static_cast<std::uint32_t>(id);
 }
 
-// T1: alias rows share one VA -> one stub slot, the first whitelist row is the
+// alias rows share one VA -> one stub slot, the first whitelist row is the
 // stable canonical name (run.cpp's pre-split comment contract).
 TEST(RunPlan, AliasRowsCollapseToTheFirstWhitelistName)
 {
@@ -110,7 +110,7 @@ TEST(RunPlan, AliasRowsCollapseToTheFirstWhitelistName)
     EXPECT_EQ(slot->second, 0U);
 }
 
-// T2: a VA registered as an intercept supersedes the boundary trap; the trap
+// a VA registered as an intercept supersedes the boundary trap; the trap
 // hook never attaches there (the ud2 body cannot be reached).
 TEST(RunPlan, InterceptSupersedesTheBoundaryTrap)
 {
@@ -128,7 +128,7 @@ TEST(RunPlan, InterceptSupersedesTheBoundaryTrap)
     EXPECT_EQ(plan.intercept_ids[0], 5U);
 }
 
-// T3: directory mode counts only the explicit whitelist - the "every
+// directory mode counts only the explicit whitelist - the "every
 // non-intercepted export is a stub" inference is the synthetic-mode rule.
 TEST(RunPlan, DirectoryModeCountsOnlyTheWhitelist)
 {
@@ -153,7 +153,7 @@ TEST(RunPlan, DirectoryModeCountsOnlyTheWhitelist)
     EXPECT_EQ(synthetic_plan.stub_slots.size(), 2U);
 }
 
-// T4: heap/Ldr family names match through the case-folding helper, not by
+// heap/Ldr family names match through the case-folding helper, not by
 // exact spelling.
 TEST(RunPlan, FamilyNamesMatchThroughFolding)
 {
@@ -172,7 +172,7 @@ TEST(RunPlan, FamilyNamesMatchThroughFolding)
     EXPECT_EQ(plan.intercept_names[1], "ldrloaddll");
 }
 
-// T5: a VA already registered (declared intercept or an earlier family row) is
+// a VA already registered (declared intercept or an earlier family row) is
 // never appended twice - the family registration keeps the first registration's
 // id.
 TEST(RunPlan, RegisteredVaIsNotAppendedTwice)
@@ -188,7 +188,7 @@ TEST(RunPlan, RegisteredVaIsNotAppendedTwice)
     EXPECT_EQ(plan.intercept_ids[0], 7U);
 }
 
-// T6: module index for an intercept VA: the owning module's region-map index
+// module index for an intercept VA: the owning module's region-map index
 // inside a module span, the 0xFFFF runtime sentinel outside every span.
 TEST(RunPlan, ModuleIndexResolvesInsideTheSpanAndFallsBackOutside)
 {
@@ -203,7 +203,7 @@ TEST(RunPlan, ModuleIndexResolvesInsideTheSpanAndFallsBackOutside)
     EXPECT_EQ(plan.intercept_modules[2], 0xFFFFU);
 }
 
-// T8: the per-mode deterministic layout: trampoline page at the front of the
+// the per-mode deterministic layout: trampoline page at the front of the
 // alloc bump range, its scratch one page in, cursors on the layout constants,
 // and no overlap between the trampoline, heap, stack and environment ranges.
 TEST(RunPlan, LayoutCursorsArePerModeAndDisjoint)

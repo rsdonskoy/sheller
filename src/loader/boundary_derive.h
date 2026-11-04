@@ -1,4 +1,4 @@
-// Boundary derivation (change real-dll-module-dir): the pure byte-level
+// Boundary derivation: the pure byte-level
 // function from a user-supplied system-module directory file to the stub
 // image the directory mode maps for a boundary-pair module (ntdll, win32u).
 // Export names, ordinals, aliases and forwarder relations survive verbatim;
@@ -27,7 +27,7 @@
 
 namespace sheller::loader {
 
-// The boundary export dispositions (loader-env「边界导出分类与不支持陷阱」):
+// The boundary export dispositions (the loader environment's classification):
 // syscall stubs answer through the engine's syscall layer, intercepted
 // entries are replaced wholesale by built-in implementations, traps
 // terminate the run with a named diagnostic, compat stubs return the
@@ -81,7 +81,7 @@ struct DerivedBoundaryExport {
 enum class BoundaryDeriveError {
     kNone = 0,
     kBadSource,          // the directory file is not a walkable PE
-    kUnsupportedMachine, // phase 1 derives AMD64 boundary images only
+    kUnsupportedMachine, // the derivation covers AMD64 boundary images only
     kNoExportDirectory,  // a boundary-pair member must export
     kUnknownExport,      // export outside the manifest rule set
     kManifestMismatch,   // rule and source disagree (shape, forwarder, hole)
@@ -107,7 +107,7 @@ struct DerivedBoundary {
 
 // Derives the stub image for one boundary-pair module from its directory
 // file bytes. The weld-slot layout (ntdll .data at the engine's fixed RVA)
-// and the reserved DOS e_res2 marker slot (design D6) are part of the
+// and the reserved DOS e_res2 marker slot are part of the
 // generated-image contract.
 std::expected<DerivedBoundary, BoundaryDeriveFailure>
 derive_boundary_image(std::span<const std::uint8_t> file, std::string_view module_name,
@@ -119,7 +119,7 @@ derive_boundary_image(std::span<const std::uint8_t> file, std::string_view modul
 // is not consulted. nullopt when the body is not a syscall stub.
 std::optional<std::uint32_t> syscall_stub_number_from_bytes(std::span<const std::uint8_t> body);
 
-// The DOS-header mode-marker slot (design D6): the derived image keeps
+// The DOS-header mode-marker slot: the derived image keeps
 // e_res2 at offset 0x28, 20 bytes, zero - the slot the directory-mode
 // marker is written into.
 inline constexpr std::uint32_t kBoundaryMarkerOffset = 0x28;

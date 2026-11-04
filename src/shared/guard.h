@@ -12,7 +12,7 @@
 // that shape from drifting apart.
 //
 // Why a template taking a mapping strategy rather than six hand-written
-// try/catch blocks: a C ABI layer is a candidate batch, and it needs exactly
+// try/catch blocks: a C ABI layer is one such consumer, and it needs exactly
 // this - run the body, render the message, then map to an error code instead of
 // a C++ failure structure. decltype(fn()) carries both the void and the
 // string_view returns through the same template, so no specialization is needed

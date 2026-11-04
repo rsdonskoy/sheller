@@ -1,4 +1,4 @@
-// The directory-mode metadata region (design D6, change real-dll-module-dir):
+// The directory-mode metadata region:
 // a versioned, bounded, deterministic payload at the fixed guest base
 // 0x7FF500000000, plus the independent mode marker in the derived ntdll's
 // DOS e_res2 slot. The payload records the world's module source table
@@ -34,7 +34,7 @@ inline constexpr std::uint64_t kMetadataMaxBytes = 0x100000;
 // the payload's semantic version - a reader that does not know it rejects
 inline constexpr std::uint32_t kSemanticVersion = 1;
 
-// The DOS e_res2 mode marker (design D6): 8-byte signature, u32 version,
+// The DOS e_res2 mode marker: 8-byte signature, u32 version,
 // u64 metadata VA, little-endian, inside the reserved zero slot the
 // derived image keeps at offset 0x28.
 inline constexpr std::uint32_t kMarkerOffset = loader::kBoundaryMarkerOffset;
@@ -86,7 +86,7 @@ struct BoundaryRecord {
     std::vector<BoundaryExportRecord> exports;
 };
 
-// One counting-whitelist row (event-ledger source rules): the (module,
+// One counting-whitelist row (the ledger's source rules): the (module,
 // export) pairs whose stub entries count, with their class
 // (compat / fallback synthetic).
 struct CounterRecord {

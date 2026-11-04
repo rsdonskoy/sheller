@@ -1,6 +1,5 @@
 #!/usr/bin/env python3
-"""Generate the directory-delivered API Set map (design D5, change
-real-dll-module-dir).
+"""Generate the directory-delivered API Set map.
 
 Reads a reviewed text source (JSON) and emits the versioned binary
 apiset-map.bin the user's system-module directory carries alongside its raw

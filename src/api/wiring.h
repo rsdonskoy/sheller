@@ -48,13 +48,13 @@ select_unpack_region(std::span<const unpack::RegionRepairReport> regions, std::u
 
 // Non-Windows sample route (construct container + replay) shared failure
 // text: the two conditions are distinct on purpose, in wording and in
-// capture status. The x86 refusal points at the tracked follow-up.
+// capture status.
 inline constexpr std::string_view kMissingSyntheticModules =
     "synthetic system modules not found (looked next to the executable); build with "
     "synth_modules enabled";
 inline constexpr std::string_view kX86SampleUnsupported =
     "this host does not support 32-bit sample input (PE32); 32-bit container "
-    "replay is tracked in .docs/OPENSPEC-BACKLOG.md";
+    "replay is not supported in this build";
 
 // Optional-header magic (0x10B PE32 / 0x20B PE32+) of a readable PE file;
 // nullopt for unreadable or non-PE input (the construction stage names the

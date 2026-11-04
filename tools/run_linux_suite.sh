@@ -14,7 +14,7 @@
 #     CMake input added at the repository root travels without editing this
 #     script (the defect that killed the gate silently in 19324d3).
 #
-# Machine paths are the environment recorded in HANDOFF (WSL Debian, user1,
+# Machine paths are this environment (WSL Debian, user1,
 # /home/user1/vcpkg, gcc-13); see tests/README.md, "local Linux verification
 # gates". Stages log to /tmp as before.
 set -uo pipefail

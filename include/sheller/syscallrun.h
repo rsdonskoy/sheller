@@ -74,7 +74,7 @@ struct SyscallRunOptions {
     // engine's interception layer (heap family, LdrLoadDll) serves them.
     bool synthetic_system_modules{false};
     std::filesystem::path synthetic_module_dir;
-    // Directory-mode system modules (change real-dll-module-dir): when set,
+    // Directory-mode system modules: when set,
     // the resident set comes strictly from this directory - real DLL bytes
     // for every module except the boundary pair (ntdll, win32u), which
     // derives under the committed boundary manifest. The host system
@@ -134,7 +134,7 @@ struct SyscallRunOptions {
     // the run and flushes (module, name, count) per entry once at run end -
     // never on the hook hot path. Empty = the engine registers no stub hook.
     std::function<void(std::uint16_t module, std::string_view name, std::uint64_t count)> stub_sink;
-    // Module source table delivery (change real-dll-module-dir): the engine
+    // Module source table delivery: the engine
     // calls this once per run, one row per resident system module, right
     // after the loader world is built - before the first instruction
     // executes, so a run that later fails still delivers its provenance.

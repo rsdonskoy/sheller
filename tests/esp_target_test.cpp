@@ -1,4 +1,4 @@
-// ESP-law stop target tests (change esp-law-oep): crafted save/restore
+// ESP-law stop target tests: crafted save/restore
 // corpora drive the engine entry directly through the public
 // run_snapshot_syscalls, so every address in play is a fixture constant.
 // The faces: the esp form stops inside the completed restore read (the
@@ -71,7 +71,7 @@ TEST(EspTarget, ArmFormStopsAtTheNextTransfer)
     // only transfer, the landing block (the terminate tail) never executes.
     // The stop is still the esp goal's hit - esp_stop rides alongside
     // xfer_stop with xfers carrying the ordinal (the public contract in
-    // syscallrun.h and the xfer-budget spec).
+    // the public syscallrun contract).
     EXPECT_TRUE(stats.esp_stop);
     EXPECT_TRUE(stats.xfer_stop);
     EXPECT_EQ(stats.xfers, 1u);

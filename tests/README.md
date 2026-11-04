@@ -22,16 +22,15 @@ and the new portable target was not re-run in the Debug configuration. The
 Debug `event_baseline` digest golden is stale at HEAD (a clean
 `b5e3828` worktree reproduces the same drifted digests while the Debug product
 reports stay byte-identical to the Release baseline); it is recorded, not
-re-pinned by this batch. What the discipline-and-diagnostics
-work added on top of the older set is the four engine discipline gates,
-`shared_guard`, `engine_diag`, the three `engine_trace` runs of one binary,
-`concurrency`, and the POSIX-only `export_guard_injection`. What the delivery-surface
-batch added on top of that is `version_consistency` and `guest_sink_guard` (both
-platforms), the three `SyscallRunGuestSink` cases inside `syscall_e2e` (Windows), and
-the installed-prefix consumer under `tests/install-consumer/`, which is deliberately
-**not** a ctest entry - see "Installed-surface checks" below. The esp-law batch
-added the portable `esp_target` suite and the `--stop` faces inside the two CLI
-suites. The portable `admission_diff` suite (both platforms) compares the two
+re-pinned here. The engine discipline gates, `shared_guard`, `engine_diag`, the
+three `engine_trace` runs of one binary, `concurrency` and the POSIX-only
+`export_guard_injection` cover the diagnostics-and-discipline side.
+`version_consistency` and `guest_sink_guard` (both platforms), the three
+`SyscallRunGuestSink` cases inside `syscall_e2e` (Windows), and the installed-prefix
+consumer under `tests/install-consumer/` cover the delivery surface; the consumer is
+deliberately **not** a ctest entry - see "Installed-surface checks" below. The
+portable `esp_target` suite and the `--stop` faces inside the two CLI suites cover
+the esp stop target. The portable `admission_diff` suite (both platforms) compares the two
 admission routes' plans directly, and the plan text is frozen in
 `tests/data/admission-plans/`.
 
@@ -419,11 +418,11 @@ Four properties the two scripts exist to keep:
   wipes at its own start (`tests/install-consumer/run.cmake:60`), and the fixed `/tmp`
   stage logs. Without it, an injection round interleaved with a leg produces the worst
   possible artifact - the injected mirror has no `cmake/`, so the leg dies naming
-  `configure` and looks exactly like the 19324d3 defect this batch was written to end.
-  Measured rather than assumed (probe: `build/linux-gate-durability/probe_flock2.sh`): a
-  second script is refused at its own lock stage with exit 1, and the lock is free again
-  once the holder exits, so there is no stale-lock state to clean - which is what made
-  this worth adding instead of documenting. The lock file is never unlinked: flock locks
+  `configure` and looks exactly like the 19324d3 defect this gate exists to catch.
+  Measured rather than assumed: a second script is refused at its own lock stage with
+  exit 1, and the lock is free again once the holder exits, so there is no stale-lock
+  state to clean - which is what made this worth adding instead of documenting. The lock
+  file is never unlinked: flock locks
   an open file description, so deleting it lets a new run open a different inode and
   proceed alongside a holder that still locks the old one. One gap is left on purpose:
   `build/wsl_linux.sh` is the developer loop and is not tracked, so it runs outside the
@@ -519,8 +518,7 @@ the exact fake green this section is about.
 `/home/user1/sheller-linux`, the `user1` account, `/home/user1/vcpkg`, `gcc-13`
 and the drvfs mount point are written into the scripts: the gates make one
 machine's environment explicit instead of implicit. Rebuilding it is recorded in
-the local handoff note (`.docs/HANDOFF.md`, untracked by the same ignore rule
-that hid the old scripts), not duplicated here.
+a local handoff note, not duplicated here.
 
 Measured 2026-10-22 against one mirror (16 MB of source after the excludes):
 `linux-debug` 48/48 (100.08 s of tests) plus the install leg, `linux-sanitizer`
@@ -620,7 +618,7 @@ sample. `packed.exe.unp` is its repaired ground truth (the `iat_repair` /
 `unpack_cli` acceptance compares against it). Real family samples stay out
 of the repository by policy.
 
-## DLL corpus (dll-sample-support)
+## DLL corpus
 
 `tests/packed.dll` (UPX-packed x64 DLL) and `tests/packed.dll.unp` (the
 `upx -d` reference) drive the DLL-input route: `capture` spawns a generated
@@ -656,12 +654,12 @@ corpus.
 `dll_capture_e2e` stays excluded from shared CI runners: the
 old runner-hardware crash past the OEP was steered by the captured world's
 per-process entropy (the virtual-TSC answer leaked host stack into its high
-bits through a narrow register write), which the captured-world-determinism
-change fixed - the replay is now cross-process byte-identical on the
-development machine - but the fixed trajectory itself has not been
+bits through a narrow register write), which is fixed - the replay is now
+cross-process byte-identical on the development machine - but the fixed
+trajectory itself has not been
 exercised on shared runner hardware, so the suite waits there.
 
-### Real-DLL directory corpus (real-dll-module-dir, env-gated)
+### Real-DLL directory corpus (env-gated)
 
 `loader_directory_test` grows one opt-in test behind an environment variable -
 it drives real Windows DLLs you supply locally and never runs in CI:

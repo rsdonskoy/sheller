@@ -19,7 +19,7 @@ namespace sheller::engine {
 namespace {
 
 // LDR_DATA_TABLE_ENTRY field offsets (x64 Win10/11 shape, the same layout
-// loader-env builds its synthetic world against): InLoadOrderLinks @0,
+// the loader environment builds its synthetic world against): InLoadOrderLinks @0,
 // InMemoryOrderLinks @0x10, InInitializationOrderLinks @0x20, DllBase @0x30,
 // EntryPoint @0x38, SizeOfImage @0x40, FullDllName @0x48, BaseDllName @0x58
 // (UNICODE_STRING: Length u16, MaximumLength u16, pad, Buffer u64).
@@ -351,7 +351,7 @@ std::optional<std::string> synthesize_pending_load(SyscallRunState& state)
     // pointers) make per-section derivation map the stub's own code/data
     // read-only, and the stub then faults before decompression - the
     // failure mode did not yield to a same-day root-cause. The whole-image
-    // ERW accounting below is the pe-loader spec's documented shape for
+    // ERW accounting below is the PE loader's documented shape for
     // such images; a faithful per-section scheme for hostile section tables
     // stays open.
     if (uc_mem_protect(uc, base, static_cast<std::size_t>(info->image_size),
@@ -370,7 +370,7 @@ std::optional<std::string> synthesize_pending_load(SyscallRunState& state)
     // Region-map module registration: the attribution layer (module!section)
     // and the sample identity ride on it. (No undo: region records are
     // append-only by design - a rolled-back module leaves a stale interval
-    // over unmapped memory, recorded in the design's known limitations.)
+    // over unmapped memory, a known limitation.)
     if (state.region_map != nullptr) {
         mem_region::ModuleImage module_image;
         module_image.module.base = base;

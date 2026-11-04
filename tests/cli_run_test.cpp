@@ -1007,7 +1007,7 @@ TEST(RunCli, EspStopVetoesTheWallClockMidLeg)
 
 } // namespace
 
-// Directory-mode CLI (change real-dll-module-dir, task 6.1): the options
+// Directory-mode CLI: the options
 // ride run (the spec's mapping-input scenario asserts the success face in
 // the engine-level tests); a bad --system-modules path exits non-zero.
 TEST(CliRun, SystemModulesBadPathExitsNonZero)

@@ -50,22 +50,22 @@ std::size_t count_synthetic_module_pages(std::span<const mem_region::ModuleImage
 std::expected<bool, SyscallRunError>
 reattach_synthetic_world(PreparedGuest& guest, const std::filesystem::path& synthetic_module_dir);
 
-// The directory-mode replay attach (design D6): rebuilds the full run
+// The directory-mode replay attach: rebuilds the full run
 // tables (modules, exports, normal semantic intercepts, API Set context,
 // source table, boundary rules) from the guest's own images plus the
 // decoded metadata record, verifying each against the record. Declared for
 // the run-stage tests; prepare_guest_stream calls it before execution.
 std::expected<void, SyscallRunError> attach_directory_world(PreparedGuest& guest);
 
-// The bilateral replay-side check (design D6): the derived ntdll's e_res2
+// The bilateral replay-side check: the derived ntdll's e_res2
 // mode marker and the fixed metadata region must both be present and agree
 // (version, address); either side alone, or a damaged payload, is the named
 // rejection - never a silent fall back to the legacy route. Both sides
-// absent: nullopt, the pre-change container route.
+// absent: nullopt, the container route without a directory.
 std::expected<std::optional<boundary_metadata::MetadataInput>, RebuildFailure>
 inspect_replay_metadata(const std::vector<snapshot::Region>& regions);
 
-// The directory mode's full-interval overlap gate (design D8): every mapped
+// The directory mode's full-interval overlap gate: every mapped
 // interval - the resident modules, the sample image, the fixed environment
 // regions (stack, heap, environment block, KUSER, the null range, the
 // allocator bump range) - must be pairwise disjoint, whole-interval, never
@@ -79,7 +79,7 @@ find_directory_range_overlap(std::span<const loader::LoadedModule> modules, Gues
 // from a PE file instead of a snapshot, and produce the same PreparedGuest
 // the snapshot path runs. An empty system_modules_dir keeps the existing
 // synthetic/host routes; a set one switches to the directory mode's strict
-// source tiers (change real-dll-module-dir).
+// source tiers.
 std::expected<PreparedGuest, RebuildFailure>
 prepare_pe_file(const std::filesystem::path& path, bool fidelity_seams = true,
                 const std::filesystem::path& synthetic_module_dir = {},

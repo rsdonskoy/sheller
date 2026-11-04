@@ -111,7 +111,7 @@ TEST(PeHeaders, SkipsTlsWhenDirectoryAbsent)
     EXPECT_FALSE(info.has_tls);
 }
 
-// P1: a thunk table whose last slot runs past the host buffer must read as
+// A thunk table whose last slot runs past the host buffer must read as
 // malformed imports, not as an out-of-bounds host read. The fixture maps a
 // valid descriptor and module name, then truncates the file so the thunk RVA
 // converts to an offset whose 8-byte slot crosses EOF.

@@ -200,7 +200,7 @@ struct LoadedSnapshot {
     // Present exactly when the container is v2 (DLL-input route); a v2
     // container without a complete pending block fails to load.
     std::optional<snapshot::PendingModule> pending{};
-    // The bilateral directory-mode inspection's verdict (design D6):
+    // The bilateral directory-mode inspection's verdict:
     // nullopt when both sides are absent (the legacy route), the decoded
     // record when the container carries the mode.
     std::optional<boundary_metadata::MetadataInput> replay_metadata{};
@@ -235,7 +235,7 @@ struct LoaderExportEntry {
 };
 
 // Where a resident system module's bytes came from - the module source
-// table's values (change real-dll-module-dir). The synthetic and host
+// table's values. The synthetic and host
 // routes mark every row with the existing classes; directory mode adds the
 // strict tiers and the explicit fallback mark.
 enum class SystemModuleSource {
@@ -299,7 +299,7 @@ struct PreparedGuest {
     // resolution follows export forwarders, which needs the export
     // directories' bytes, not just the name index.
     std::vector<loader::LoadedModule> loaded_modules{};
-    // Directory-mode world facts (change real-dll-module-dir): empty map and
+    // Directory-mode world facts: empty map and
     // sources in the synthetic/host routes - behavior stays byte-identical.
     bool directory_mode{false};
     // folded module name -> source class, the construction's module source
@@ -311,11 +311,11 @@ struct PreparedGuest {
     // the directory's API Set map, loaded against the raw ntdll's anchor;
     // the explicit resolution context points at it
     loader::ApiSetMapView api_set_map{};
-    // the decoded replay-side metadata record (design D6): present exactly
+    // the decoded replay-side metadata record: present exactly
     // when the container carries the bilateral directory-mode marks
     std::optional<boundary_metadata::MetadataInput> directory_metadata{};
-    // Directory-mode counting whitelist and trap stop points (change
-    // real-dll-module-dir): the whitelist is the explicit (module base, VA,
+    // Directory-mode counting whitelist and trap stop points: the whitelist is
+    // the explicit (module base, VA,
     // name) set whose stub entries count - derived compat stubs plus the
     // fallback synthetic modules' exports; the trap VAs are the (c)-class
     // unsupported exports whose entry terminates the run. Empty in the
@@ -528,7 +528,7 @@ struct SyscallRunState {
     bool loop_probe_pending{};
     std::uint64_t last_block_address{};
     std::map<std::uint64_t, std::pair<std::uint32_t, std::uint64_t>> known_burn_loops{};
-    // Loop-native-gate (slice 0): every probe window lands in exactly one
+    // Loop-native-gate: every probe window lands in exactly one
     // verdict slot - unconditionally accumulated so the admission-rate data
     // exists with the switch off; only the printing is env-gated. The INSN
     // flag is the probe-window evidence bit (rdtsc/rdtscp/cpuid hooks set
@@ -644,7 +644,7 @@ struct SyscallRunState {
     // Fidelity dispatch mode + engine-side SEH dispatch state.
     bool fidelity_dispatch{};
     seh::SehDispatchState seh;
-    // Directory-mode boundary runtime (change real-dll-module-dir): the
+    // Directory-mode boundary runtime: the
     // trap stop points (exact-entry hooks), the fired stop's diagnosis, and
     // the explicit API Set resolution context (directory map; empty in the
     // synthetic routes — the runtime DLL binding and the dynamic queries

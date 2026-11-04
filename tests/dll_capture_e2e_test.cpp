@@ -8,12 +8,11 @@
 //
 // This suite is excluded from shared CI runners: past the OEP the payload's
 // CRT init used to be steered by per-process entropy from the live loader,
-// and on runner hardware it crashed before the DllMain print (see the
-// code-review-7.3.md record in the change archive). The captured-world-
-// determinism change adopted that entropy into the deterministic answer
-// face - the replay is now cross-process byte-identical on the development
-// machine - but the fixed trajectory has not been exercised on shared
-// runner hardware, so the exclusion stands while the suite is green here.
+// and on runner hardware it crashed before the DllMain print. That entropy
+// is now part of the deterministic answer face - the replay is cross-process
+// byte-identical on the development machine - but the fixed trajectory has
+// not been exercised on shared runner hardware, so the exclusion stands while
+// the suite is green here.
 
 #include <gtest/gtest.h>
 
@@ -191,7 +190,7 @@ std::uint32_t pe_entry_rva(const std::vector<std::uint8_t>& pe)
 
 #endif // _WIN32
 
-// The artifact-chain determinism pin (captured-world-determinism task 3.2):
+// The artifact-chain determinism pin:
 // one capture, then two independent det_helper processes replay the same
 // container - the complete raw event stream (type/seq/pc/payload records),
 // the exit dump directory (.bin files and manifest) and the repaired .unp

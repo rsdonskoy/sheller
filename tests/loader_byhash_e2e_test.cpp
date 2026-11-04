@@ -2,7 +2,7 @@
 // (tests/corpus/byhash_shell.asm -> byhash_shell.bin) walks the PEB->Ldr
 // triple-chain and verifies the MZ signature at each module's DllBase.
 // Exit code = the number of valid modules found. Loaded through run_pe_file
-// to validate the loader-env construction.
+// to validate the loader environment construction.
 
 #include "wrapper.h"
 

@@ -1,7 +1,7 @@
 name: linux
 
-# milestone-gated CI: run manually at a milestone close (gh workflow run),
-# or automatically on pull requests. Pushes to main stay un-billed.
+# Manual or pull-request CI (gh workflow run for an on-demand run).
+# Pushes to main stay un-billed.
 on:
   workflow_dispatch:
   pull_request:
@@ -71,7 +71,7 @@ jobs:
         # exception_e2e, behavior_e2e, loader_byhash_x86_e2e) carry
         # layout-derived goldens that only match the machine that generated
         # them - the local norm is 36/40 = clean-tree same set. Excluded
-        # until a layout-normalization pass lands (HANDOFF).
+        # until the layout normalization is in place.
         run: ctest --preset linux-release -E "event_baseline|exception_e2e|behavior_e2e|loader_byhash_x86_e2e"
 
   linux-sanitizer:

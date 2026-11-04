@@ -262,8 +262,8 @@ TEST(FacadeConcurrency, UnpackFromFourThreadsGetsDistinctWorkDirs)
 // The byte-level half of the unpack claim, where the route is deterministic. Off
 // Windows the sample runs through the loader route over the generated synthetic
 // modules, which is a fixed input; on Windows it rides the live capture route, whose
-// layout drifts from run to run (the batch's baseline note says the same, which is why
-// the byte judgment there goes through frozen snapshots instead).
+// layout drifts from run to run (which is why the byte judgment there goes through
+// frozen snapshots instead).
 TEST(FacadeConcurrency, UnpackBytesMatchTheSingleThreadBaseline)
 {
     const auto base_dir = worker_dir("unpack_base", 0);

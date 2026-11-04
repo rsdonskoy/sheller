@@ -53,7 +53,7 @@ struct ResolvedExport {
     std::string final_name{};     // final resolved function name
 };
 
-// The API-set resolution policy, explicit per world (design D4/D5): the
+// The API-set resolution policy, explicit per world: the
 // synthetic-mode static prefix rules, or the directory-delivered map. One
 // world carries one context object, and the same context backs import
 // admission, resident-module IAT binding, the runtime DLL route and the
