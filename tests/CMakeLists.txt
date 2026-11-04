@@ -517,6 +517,21 @@ sheller_apply_common(write_ledger_test)
 
 add_test(NAME write_ledger COMMAND write_ledger_test)
 
+# Read-only run facts (change assemble-run-state-facts): the PEB-derived cwd
+# and its degradation cells, the sample module's region-map record, and the
+# assembly-stage failure's raw uc_err - portable by design (one hand-built
+# guest plus one crafted v1 container, no capture route); the cwd happy path
+# skips off Windows because the captured separator is a backslash.
+add_executable(run_facts_test run_facts_test.cpp)
+target_include_directories(run_facts_test PRIVATE
+  "${CMAKE_CURRENT_SOURCE_DIR}/../src/engine")
+target_include_directories(run_facts_test SYSTEM PRIVATE
+  ${SHELLER_UNICORN_INCLUDE_DIR})
+target_link_libraries(run_facts_test PRIVATE GTest::gtest_main sheller_engine)
+sheller_apply_common(run_facts_test)
+
+add_test(NAME run_facts COMMAND run_facts_test)
+
 # Synthetic DLL load transactions: no host process or system DLL fixtures.
 add_executable(dll_loader_test dll_loader_test.cpp)
 target_include_directories(dll_loader_test PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/../src/engine")
