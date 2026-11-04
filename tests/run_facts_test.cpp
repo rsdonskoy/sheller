@@ -275,7 +275,10 @@ TEST(RunFacts, SyscallNumberAndNameTablesAreInverse)
                                 std::move(map),
                                 std::move(images),
                                 std::move(regions)};
-    guest.loader_modules = {module.module};
+    // push_back rather than initializer-list assignment: GCC's array-bounds
+    // analysis mis-sizes the one-element temporary under ASan and rejects the
+    // build with -Werror.
+    guest.loader_modules.push_back(module.module);
 
     const auto facts = facts_for(guest);
     ASSERT_EQ(facts.syscall_numbers_by_name.size(), 2U);

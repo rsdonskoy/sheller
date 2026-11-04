@@ -392,8 +392,8 @@ died without anyone noticing (see the mirror bullet).
 
 | script | preset | shape |
 |---|---|---|
-| `tools/run_linux_suite.sh` | `linux-debug` | lock, mount, mirror, chown, configure, build, the whole registered set (49 tests), then the installed-consumer leg |
-| `tools/run_linux_sanitizer.sh` | `linux-sanitizer` | the same stages, no install leg, and the CI's four-name `-E` exclusion (47 of 49) |
+| `tools/run_linux_suite.sh` | `linux-debug` | lock, mount, mirror, chown, configure, build, the whole registered set (61 tests), then the installed-consumer leg |
+| `tools/run_linux_sanitizer.sh` | `linux-sanitizer` | the same stages, no install leg, and the CI's four-name `-E` exclusion (59 of 61: `export_surface` is skipped on this preset and only `event_baseline` of the four exclusion names registers) |
 
 Both drive WSL as root, because they mount the dev drive and chown the mirror
 target. Copy-paste invocation:
