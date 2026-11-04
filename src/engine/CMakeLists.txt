@@ -29,6 +29,8 @@ target_sources(sheller_engine PRIVATE
   log_state.cpp
   run.cpp
   run.h
+  run_apply.cpp
+  run_apply.h
   run_facts.cpp
   run_facts.h
   run_plan.cpp
