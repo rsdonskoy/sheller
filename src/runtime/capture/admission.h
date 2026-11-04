@@ -19,6 +19,7 @@
 #ifndef SHELLER_CAPTURE_ADMISSION_H
 #define SHELLER_CAPTURE_ADMISSION_H
 
+#include "module_name.h"
 #include "pe_headers.h"
 #include "wrapper.h"
 
@@ -31,10 +32,8 @@
 
 namespace sheller::capture {
 
-// Windows module-name matching folds ASCII only; both routes and the runner
-// builder share this one rule.
-std::string fold_module_name(std::string_view name);
-bool fold_module_name_equals(std::string_view a, std::string_view b);
+// Windows module-name matching folds ASCII only; the admission, the synthetic
+// source and the runner builder all share the one rule in module_name.h.
 
 // One verified module, borrowed for the current dependency. A source may keep
 // the view in a container it grows later, so the skeleton never holds it past

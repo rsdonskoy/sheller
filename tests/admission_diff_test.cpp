@@ -23,6 +23,7 @@
 // admission reads the sample's import directory from file bytes and never maps
 // the sample, so the rest of the image only has to be walkable.
 
+#include "admission.h"
 #include "craft_admission.h"
 #include "wrapper.h"
 
@@ -253,6 +254,26 @@ std::expected<capture::RunnerPlan, std::string> windows_plan(const Sample& sampl
     return capture::admit_dll_sample(sample.bytes, sample.arrival);
 }
 #endif
+
+// ---- the shared module-name fold -----------------------------------------
+
+TEST(AdmissionFold, FoldsAsciiCaseOnly)
+{
+    EXPECT_EQ(capture::fold_module_name("KERNEL32.DLL"), "kernel32.dll");
+    EXPECT_EQ(capture::fold_module_name("User32.Dll"), "user32.dll");
+    EXPECT_EQ(capture::fold_module_name(""), "");
+    // A byte outside ASCII is not locale-folded: the admission's names are
+    // ASCII, and a host locale must not change an admission answer.
+    EXPECT_EQ(capture::fold_module_name("\xC4"), "\xC4");
+}
+
+TEST(AdmissionFold, ComparesFoldedNamesWithoutMaterializingOne)
+{
+    EXPECT_TRUE(capture::fold_module_name_equals("USER32.dll", "user32.DLL"));
+    EXPECT_TRUE(capture::fold_module_name_equals("", ""));
+    EXPECT_FALSE(capture::fold_module_name_equals("user32.dll", "user32.dat"));
+    EXPECT_FALSE(capture::fold_module_name_equals("user32.dll", "user32.dll "));
+}
 
 // ---- T1: both routes, one plan -------------------------------------------
 

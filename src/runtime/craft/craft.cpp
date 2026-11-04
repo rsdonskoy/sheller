@@ -55,16 +55,6 @@ bool all_zero(const std::vector<std::uint8_t>& bytes)
                        [](const std::uint8_t byte) { return byte == 0; });
 }
 
-std::string folded(std::string_view name)
-{
-    std::string out;
-    out.reserve(name.size());
-    for (const char c : name) {
-        out.push_back(static_cast<char>(std::tolower(static_cast<unsigned char>(c))));
-    }
-    return out;
-}
-
 // Export-directory facts of a MAPPED image (RVAs index the buffer directly -
 // build_image already folded the section layout). Just enough for the
 // ordinal verification: the name index lives in loader::index_exports.
@@ -270,7 +260,7 @@ class SyntheticModuleSource final : public capture::ModuleSource {
     const loader::LoadedModule* load_module(const std::string& original_name, std::string& error)
     {
         if (directory_mode_) {
-            auto host = folded(original_name);
+            auto host = capture::fold_module_name(original_name);
             if (host.starts_with("api-ms-") || host.starts_with("ext-ms-")) {
                 if (host.ends_with(".dll")) {
                     host.resize(host.size() - 4);
@@ -280,7 +270,7 @@ class SyntheticModuleSource final : public capture::ModuleSource {
                     error = "api set not mapped: " + original_name;
                     return nullptr;
                 }
-                host = folded(*mapped);
+                host = capture::fold_module_name(*mapped);
             }
             if (!host.ends_with(".dll")) {
                 host += ".dll";
@@ -331,9 +321,9 @@ class SyntheticModuleSource final : public capture::ModuleSource {
             modules_.push_back(std::move(module));
             return &modules_.back();
         }
-        const std::string key = folded(original_name);
+        const std::string key = capture::fold_module_name(original_name);
         for (const auto& module : modules_) {
-            if (folded(std::string_view(module.name.data())) == key) {
+            if (capture::fold_module_name(std::string_view(module.name.data())) == key) {
                 return &module;
             }
         }

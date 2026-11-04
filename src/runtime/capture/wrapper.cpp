@@ -1,5 +1,7 @@
 #include "wrapper.h"
 
+#include "module_name.h"
+
 #include <algorithm>
 #include <cctype>
 #include <cstring>
@@ -217,20 +219,6 @@ void store64(std::vector<std::uint8_t>& out, const std::size_t offset, const std
     }
 }
 
-bool same_fold(const std::string_view a, const std::string_view b)
-{
-    if (a.size() != b.size()) {
-        return false;
-    }
-    for (std::size_t i = 0; i < a.size(); ++i) {
-        if (std::tolower(static_cast<unsigned char>(a[i])) !=
-            std::tolower(static_cast<unsigned char>(b[i]))) {
-            return false;
-        }
-    }
-    return true;
-}
-
 } // namespace
 
 std::string_view runner_error_message(const RunnerError error)
@@ -272,11 +260,11 @@ std::expected<std::vector<std::uint8_t>, RunnerError> build_runner(const RunnerP
         if (import.symbol.size() > 128 || import.module.empty() || import.module.size() > 64) {
             return std::unexpected(RunnerError::kBadSymbol);
         }
-        if (same_fold(import.module, "kernel32.dll")) {
+        if (fold_module_name_equals(import.module, "kernel32.dll")) {
             has_load_library = has_load_library || import.symbol == "LoadLibraryW";
             has_exit = has_exit || import.symbol == "ExitProcess";
         }
-        if (same_fold(import.module, plan.arrival_name)) {
+        if (fold_module_name_equals(import.module, plan.arrival_name)) {
             return std::unexpected(RunnerError::kReservedArrival);
         }
     }
@@ -304,7 +292,7 @@ std::expected<std::vector<std::uint8_t>, RunnerError> build_runner(const RunnerP
     for (const auto& import : plan.imports) {
         bool found = false;
         for (auto& [module, slots] : groups) {
-            if (same_fold(module, import.module)) {
+            if (fold_module_name_equals(module, import.module)) {
                 slots.push_back(&import);
                 found = true;
                 break;
@@ -419,7 +407,7 @@ std::expected<std::vector<std::uint8_t>, RunnerError> build_runner(const RunnerP
                              const std::string_view symbol) -> std::size_t {
         std::size_t slot = 0;
         for (const auto& [group_module, slots] : groups) {
-            if (!same_fold(group_module, module)) {
+            if (!fold_module_name_equals(group_module, module)) {
                 slot += slots.size() + 1; // past this module's terminator
                 continue;
             }

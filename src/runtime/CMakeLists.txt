@@ -11,6 +11,7 @@ target_include_directories(sheller_capture
   PUBLIC $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/../../include>)
 target_sources(sheller_capture PRIVATE
   capture/pe_headers.h
+  capture/module_name.h
   capture/admission.h
   capture/admission.cpp
   capture/wrapper.h
