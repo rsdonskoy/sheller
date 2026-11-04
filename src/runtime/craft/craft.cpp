@@ -421,97 +421,9 @@ admit_synth_dll_sample(const std::vector<std::uint8_t>& sample_bytes,
                        const std::filesystem::path& system_modules_dir,
                        const bool system_modules_fallback)
 {
-    // The arrival name becomes the runner's path string and the emulated
-    // Ldr entry's BaseDllName (bounded to 64 chars there) - enforce one
-    // bound at the source, matching the Windows admission exactly.
-    if (arrival_name.empty() || arrival_name.size() > 64 ||
-        !std::all_of(arrival_name.begin(), arrival_name.end(),
-                     [](const unsigned char c) { return c >= 0x20 && c < 0x7F && c != '\\'; })) {
-        return std::unexpected("sample file name: empty, non-ASCII, or over 64 characters");
-    }
-    std::vector<capture::PeImportThunk> imports;
-    if (const auto error =
-            capture::parse_imports(sample_bytes.data(), sample_bytes.size(), imports);
-        error != capture::PeError::kNone) {
-        return std::unexpected(std::string(capture::pe_error_message(error)));
-    }
-
-    capture::RunnerPlan plan;
-    plan.arch = capture::WrapArch::kX64;
-    plan.arrival_name = arrival_name;
-    plan.imports.push_back({"kernel32.dll", "LoadLibraryW", 0});
-    plan.imports.push_back({"kernel32.dll", "ExitProcess", 0});
-
     SyntheticModuleSource source(synth_dir, system_modules_dir, system_modules_fallback,
                                  arrival_name);
-    if (const auto prepared = source.prepare(); !prepared.has_value()) {
-        return std::unexpected(prepared.error());
-    }
-
-    std::set<std::string> processed{folded("kernel32.dll")};
-    std::size_t cursor = 0;
-    // (folded key, original spelling) - errors name the dependency the way
-    // the sample spelled it, not the folded lookup key.
-    std::vector<std::pair<std::string, std::string>> queue;
-    for (const auto& import : imports) {
-        const std::string key = folded(import.module);
-        if (std::none_of(queue.begin(), queue.end(),
-                         [&](const std::pair<std::string, std::string>& pending) {
-                             return pending.first == key;
-                         })) {
-            queue.push_back({key, import.module});
-        }
-    }
-    while (cursor < queue.size()) {
-        const auto [key, spelled] = queue[cursor++];
-        if (key == folded(arrival_name)) {
-            return std::unexpected(
-                source.dependency_error(spelled, capture::AdmissionProblem::kCollisionWithSample));
-        }
-        if (processed.count(key) != 0) {
-            continue;
-        }
-        processed.insert(key);
-        if (key.empty() || key.find('\\') != std::string::npos ||
-            key.find('/') != std::string::npos || key.find(':') != std::string::npos ||
-            key.find("..") != std::string::npos) {
-            return std::unexpected(
-                source.dependency_error(spelled, capture::AdmissionProblem::kPathShapedName));
-        }
-        std::string source_error;
-        capture::ModuleView* module = source.acquire(spelled, key, source_error);
-        if (module == nullptr) {
-            return std::unexpected(std::move(source_error));
-        }
-
-        // Pick the first referenced symbol that verifies against the frozen
-        // module, in the sample's own import order (the Windows admission's
-        // selection rule, so one corpus yields one plan everywhere).
-        bool selected = false;
-        for (const auto& import : imports) {
-            if (folded(import.module) != key) {
-                continue;
-            }
-            const auto resolved = module->resolves(import.name, import.ordinal);
-            if (!resolved.has_value()) {
-                return std::unexpected(resolved.error());
-            }
-            if (!resolved->exported) {
-                continue;
-            }
-            plan.imports.push_back({import.module, import.name, import.ordinal});
-            if (plan.imports.size() > capture::kMaxRunnerImports) {
-                return std::unexpected("dependency closure exceeds the runner capacity");
-            }
-            selected = true;
-            break;
-        }
-        if (!selected) {
-            return std::unexpected(
-                source.dependency_error(spelled, capture::AdmissionProblem::kNoImportableExport));
-        }
-    }
-    return plan;
+    return capture::admit_sample(sample_bytes, arrival_name, source);
 }
 
 namespace {

@@ -28,16 +28,6 @@
 namespace sheller::capture {
 namespace {
 
-std::string folded(const std::string& name)
-{
-    std::string out;
-    out.reserve(name.size());
-    for (const char c : name) {
-        out.push_back(static_cast<char>(std::tolower(static_cast<unsigned char>(c))));
-    }
-    return out;
-}
-
 std::wstring to_wide(const std::string& text)
 {
     std::wstring out(text.size() + 1, L'\0');
@@ -420,132 +410,8 @@ class SystemModuleSource final : public ModuleSource {
 std::expected<RunnerPlan, std::string>
 admit_dll_sample(const std::vector<std::uint8_t>& sample_bytes, const std::string& arrival_name)
 {
-    // The arrival name becomes the runner's path string and the emulated
-    // Ldr entry's BaseDllName (bounded to 64 chars there) - enforce one
-    // bound at the source. Non-ASCII is rejected honestly rather than
-    // through a lossy widening the engine cannot round-trip.
-    if (arrival_name.empty() || arrival_name.size() > 64 ||
-        !std::all_of(arrival_name.begin(), arrival_name.end(),
-                     [](const unsigned char c) { return c >= 0x20 && c < 0x7F && c != '\\'; })) {
-        return std::unexpected("sample file name: empty, non-ASCII, or over 64 characters");
-    }
-    std::vector<PeImportThunk> imports;
-    if (const auto error = parse_imports(sample_bytes.data(), sample_bytes.size(), imports);
-        error != PeError::kNone) {
-        return std::unexpected(std::string(pe_error_message(error)));
-    }
-
-    RunnerPlan plan;
-    plan.arch = WrapArch::kX64;
-    plan.arrival_name = arrival_name;
-    plan.imports.push_back({"kernel32.dll", "LoadLibraryW", 0});
-    plan.imports.push_back({"kernel32.dll", "ExitProcess", 0});
-
     SystemModuleSource source;
-
-    // BFS over the dependency closure. Level 0 entries (the sample's direct
-    // imports) each contribute one runner import; deeper levels are
-    // verification-only - the loader resolves the chain through the same
-    // system32 search when it initializes the runner's imports.
-    struct QueueEntry {
-        std::string module;
-        bool direct;
-    };
-    std::vector<QueueEntry> queue;
-    for (const auto& import : imports) {
-        if (std::none_of(queue.begin(), queue.end(), [&](const QueueEntry& entry) {
-                return folded(entry.module) == folded(import.module);
-            })) {
-            queue.push_back({import.module, true});
-        }
-    }
-
-    std::set<std::string> processed{folded("kernel32.dll")}; // base pair covers it
-    std::size_t cursor = 0;
-    while (cursor < queue.size()) {
-        const QueueEntry entry = queue[cursor++];
-        const std::string key = folded(entry.module);
-        if (key == folded(arrival_name)) {
-            return std::unexpected(
-                source.dependency_error(entry.module, AdmissionProblem::kCollisionWithSample));
-        }
-        if (processed.count(key) != 0) {
-            continue;
-        }
-        processed.insert(key);
-        if (entry.module.empty() || entry.module.find('\\') != std::string::npos ||
-            entry.module.find('/') != std::string::npos ||
-            entry.module.find(':') != std::string::npos ||
-            entry.module.find("..") != std::string::npos) {
-            return std::unexpected(
-                source.dependency_error(entry.module, AdmissionProblem::kPathShapedName));
-        }
-
-        // System verification: the source proves the module is the operating
-        // system's and hands back a borrowed view of its bytes.
-        std::string source_error;
-        ModuleView* module = source.acquire(entry.module, key, source_error);
-        if (module == nullptr) {
-            return std::unexpected(std::move(source_error));
-        }
-
-        // The module's own imports join the closure (verification only).
-        for (const auto& import : module->imports()) {
-            const std::string dep_key = folded(import.module);
-            if (!source.is_base_module(dep_key) && dep_key != folded(arrival_name) &&
-                processed.count(dep_key) == 0 &&
-                std::none_of(queue.begin(), queue.end(), [&](const QueueEntry& pending) {
-                    return folded(pending.module) == dep_key;
-                })) {
-                queue.push_back({import.module, false});
-            }
-        }
-
-        if (!entry.direct) {
-            continue;
-        }
-
-        // Pick the first referenced symbol that resolves in this module's
-        // export table; a forwarder adds its target DLL to the closure.
-        bool selected = false;
-        for (const auto& import : imports) {
-            if (folded(import.module) != key) {
-                continue;
-            }
-            const auto resolved = module->resolves(import.name, import.ordinal);
-            if (!resolved.has_value()) {
-                return std::unexpected(resolved.error());
-            }
-            const auto& hit = *resolved;
-            if (!hit.exported) {
-                continue;
-            }
-            if (hit.forwarder) {
-                const std::string target_key = folded(hit.forward_to);
-                if (!source.is_base_module(target_key) && target_key != folded(arrival_name) &&
-                    processed.count(target_key) == 0 &&
-                    std::none_of(queue.begin(), queue.end(), [&](const QueueEntry& pending) {
-                        return folded(pending.module) == target_key;
-                    })) {
-                    queue.push_back({hit.forward_to, false});
-                }
-            }
-            plan.imports.push_back({entry.module, import.name, import.ordinal});
-            if (plan.imports.size() > kMaxRunnerImports) {
-                return std::unexpected("dependency closure exceeds the runner capacity");
-            }
-            selected = true;
-            break;
-        }
-        if (!selected) {
-            // Without an importable symbol the runner cannot preload this
-            // dependency - out of contract, by name.
-            return std::unexpected(
-                source.dependency_error(entry.module, AdmissionProblem::kNoImportableExport));
-        }
-    }
-
-    return plan;
+    return admit_sample(sample_bytes, arrival_name, source);
 }
 
 } // namespace sheller::capture
