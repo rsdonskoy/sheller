@@ -1,9 +1,9 @@
 # tests/
 
 GoogleTest suites plus the synthetic samples, thunks, blobs and golden
-baselines they drive: 78 ctest tests register on a Windows host (measured with
-the run-plan change), 51 on a Linux host (the new portable target registers
-there too). Portable units run on every platform
+baselines they drive: 79 ctest tests register on a Windows host, 61 on a Linux
+host (both measured with the runner-admission merge; the new portable target
+registers on both). Portable units run on every platform
 and CI job; Windows-only ones need a real capture host (real loader, real
 system DLLs, ml64/nasm toolchain). The Linux side has a local pre-push gate of
 its own, driven by two tracked scripts under `tools/` - see "Local Linux
@@ -12,13 +12,12 @@ verification gates" below.
 Two of them are the shared-library faces: `shared_api` (direct calls
 through the shared interface library) and `export_surface` (its symbol face
 reconciled against a checked-in list). Two numbers are worth keeping apart when a count is quoted. Locally the whole
-registered set runs (`ctest --preset windows-release` -> 78, Linux -> 51); CI
+registered set runs (`ctest --preset windows-release` -> 79, Linux -> 61); CI
 excludes the corpus-heavy live-capture entries, so its suite is smaller - with
 `-E "event_baseline|exception_e2e|behavior_e2e|loader_byhash_x86_e2e|capture_x86_e2e"`
-Windows runs 73 (measured on the 78-test set), and the same exclusion on Linux
-leaves 50 because only `event_baseline` of those five registers there (the
-Linux reading is the registered set minus that entry, not re-measured).
-Registration is configuration-independent: Windows Debug registers the same 78,
+Windows runs 74 (measured on the 79-test set) and Linux runs 60 (only
+`event_baseline` of those five registers there, so the exclusion removes one).
+Registration is configuration-independent: Windows Debug registers the same 79,
 and the new portable target was not re-run in the Debug configuration. The
 Debug `event_baseline` digest golden is stale at HEAD (a clean
 `b5e3828` worktree reproduces the same drifted digests while the Debug product
@@ -32,7 +31,9 @@ platforms), the three `SyscallRunGuestSink` cases inside `syscall_e2e` (Windows)
 the installed-prefix consumer under `tests/install-consumer/`, which is deliberately
 **not** a ctest entry - see "Installed-surface checks" below. The esp-law batch
 added the portable `esp_target` suite and the `--stop` faces inside the two CLI
-suites.
+suites. The runner-admission merge added the portable `admission_diff` suite
+(both platforms): the two admission routes' plans are compared directly, and the
+plan text is frozen in `tests/data/admission-plans/`.
 
 ## The two link routes, and which suites sit on which
 
@@ -92,6 +93,7 @@ for reading these files: the six product names (`analyze` x2, `unpack_sample`,
 | `run_plan_test` | `run_plan` | the run plan's pure decision core over hand-built guests with a null unicorn: alias rows sharing one VA collapse to one stub slot with the first whitelist name, an intercept supersedes a boundary trap on the same VA, directory mode counts only the explicit whitelist while the synthetic mode counts every non-intercepted export, heap/Ldr family names match through `fold_name`, an already-registered VA is never appended twice, the intercept VA's module index resolves inside the module span and falls back to the `0xFFFF` sentinel outside, and the per-mode trampoline/allocator cursors sit on the layout constants with no overlap against the heap, stack and environment ranges (T1-T6 and T8 of the split assessment; each assertion was mutation-proven red) |
 | `behavior_rules_test` | `behavior_rules` | judgment-event emission over synthetic fact sequences: every rule pattern, one event per hit (no dedupe, no capacity cap), the rule fields carried on the wire |
 | `wrapper_test` | `wrapper` | minimal-PE blob construction for bare shellcode |
+| `admission_diff_test` | `admission_diff` | the two runner-admission routes are one algorithm: T1 drives the Windows capture admission (`capture::admit_dll_sample`) and the synthetic construction admission (`engine::admit_synth_dll_sample`) over the same five-sample real-export corpus and asserts the plans are equal (`RunnerPlan::operator==`; Windows-gated - the capture route needs real system DLLs); T2 serializes each plan to the module / symbol / ordinal text frozen in `tests/data/admission-plans/*.plan` under the sample's arrival name, and checks it through the synthetic route on **every** platform (Linux CI's admission coverage) plus the capture route on Windows; T3 asserts both routes refuse the same rejection corpus (path-shaped dependency name, missing export, arrival-name collision, unverifiable module) without comparing their deliberately different wording. The fixtures are hand-built x64 PEs with an arbitrary import table, generated in-test. The assessment's over-capacity cell is not reachable from sample bytes - `parse_imports` bounds a sample at 64 module descriptors, so a plan carries at most 66 imports against the 96-entry runner capacity - so the capacity guard has no corpus and the test does not pretend otherwise. The module-name fold (`fold_module_name` / `fold_module_name_equals`) is pinned here too: ASCII-only case folding, non-ASCII bytes pass through, and equal-length comparison |
 | `syscall_bench` | `syscall_bench` | micro-benchmark + red-line gate: syscall chain <= 10 us/call, bare hook cost |
 | `det_helper` | - (no ctest entry; driven by `dll_capture_e2e`) | resident determinism helper: one replay per invocation over a given container - raw event stream (`[type][seq][pc][payload]` records) to disk through the facade's host observer, exit dump, repair into a `.unp`; no budget and no wall clock, terminated in its stats line only |
 | `event_baseline_test` | `event_baseline` | relocation-normalized event-stream baselines vs goldens: the production event stream (rules + forwarding + one cursor) over the Windows sample set; address-bearing forwarded/judgment payload fields are normalized, the type/order/pc pins remain |
@@ -600,6 +602,15 @@ Measured 2026-10-22 against one mirror (16 MB of source after the excludes):
   between /Od and /O2 links). Regenerate per tree via
   `SHELLER_REGEN_EVENT_BASELINE`.
 
+`data/admission-plans/*.plan` is the runner-admission counterpart: one file per
+differential-corpus sample (`packed`, `kernel32_by_name`, `user32_by_name`,
+`ntdll_by_ordinal`, `kernelbase_by_name`), each a `# <arrival name>` header and
+one `module<TAB>symbol<TAB>ordinal` row per plan import in generation order.
+`admission_diff` compares the synthetic route's text against it on every
+platform and the capture route's text on Windows. Regenerate with
+`SHELLER_ADMISSION_PLAN_WRITE=1` when the corpus or the shared selection rule
+changes; the files are ordinary check-in artifacts, not binary goldens.
+
 ## Corpus
 
 `packed.exe` - UPX-packed x64 sample kept as the dump-engine and
@@ -635,7 +646,12 @@ plus the artifact-chain pin
 `det_helper` target serializes the complete raw event stream, the exit
 dump and the repaired `.unp` per process, and the test byte-compares the
 three groups across two helper processes over one container) - all
-WIN32-gated. `dll_capture_e2e` stays excluded from shared CI runners: the
+WIN32-gated. The admission algorithm those routes share is pinned from the
+other side by `admission_diff` (see the portable table above): T1 compares the
+capture route's plan with the synthetic route's plan, and T2 freezes both in
+`tests/data/admission-plans/*.plan`, so a change that fixes one route and
+forgets the other fails by name instead of silently splitting the corpus.
+`dll_capture_e2e` stays excluded from shared CI runners: the
 old runner-hardware crash past the OEP was steered by the captured world's
 per-process entropy (the virtual-TSC answer leaked host stack into its high
 bits through a narrow register write), which the captured-world-determinism
