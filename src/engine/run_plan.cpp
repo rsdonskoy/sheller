@@ -48,6 +48,13 @@ std::expected<RunPlan, SyscallRunFailure> build_run_plan(const PreparedGuest& gu
     // The declared intercept set, then the DLL-input continuation slot (the
     // apply stage arms it; the VA/id pair is decided here so the identity
     // tables below stay index-aligned with the hook list).
+    //
+    // Assembly-once invariant: the slot row is decided from `guest.pending`
+    // alone, i.e. it assumes the arm below succeeds. `arm_dll_resume_slot`
+    // early-returns (leaving no slot row) when the slot page is already
+    // mapped - only reachable by assembling one guest twice, which the single
+    // caller never does. A future reusable assembly must move this decision
+    // after the arm's verdict.
     for (const auto& [va, id] : guest.intercepts) {
         plan.intercept_vas.push_back(va);
         plan.intercept_ids.push_back(id);

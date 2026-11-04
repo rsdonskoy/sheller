@@ -5,6 +5,7 @@
 // second approximation of it.
 #pragma once
 
+#include <cstddef>
 #include <cstdint>
 #include <cstring>
 #include <vector>

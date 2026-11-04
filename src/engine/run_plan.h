@@ -1,10 +1,10 @@
 // The run's pure decision core: every table and verdict the syscall run's
-// state assembly needs, computed from the guest facts alone. build_run_plan
-// takes const references and never touches unicorn, the run state, or guest
-// memory - that is the point of the split: the rules below (intercept
-// registration, alias adjudication, stub counting, boundary-trap filtering,
-// deterministic cursor layout) become table-driven unit tests instead of
-// behavior that only end-to-end replays can observe.
+// state assembly needs, computed from the guest's construction tables alone.
+// build_run_plan takes const references and never touches unicorn, the run
+// state, or guest memory - that is the point of the split: the rules below
+// (intercept registration, alias adjudication, stub counting, boundary-trap
+// filtering, deterministic cursor layout) become table-driven unit tests
+// instead of behavior that only end-to-end replays can observe.
 //
 // RunPlan is transient: it exists on the assembly stack and is NEVER stored in
 // SyscallRunState (the hook callbacks' user_data, whose layout is an implicit
@@ -72,10 +72,12 @@ struct RunPlan {
     bool needs_stub_hooks{false};
 };
 
-// Pure: reads the guest's construction tables and the guest facts, writes
-// neither. The decision core is total today (every rule has a defined answer),
-// so the failure channel carries no producer yet - it is the signature the
-// apply split (later slice) continues with.
+// Pure: reads the guest's construction tables and writes nothing. The facts
+// parameter is reserved for the apply split's decision inputs (this core needs
+// none of them yet), so it is deliberately unused. The decision core is total
+// today (every rule has a defined answer), so the failure channel carries no
+// producer yet - it is the signature the apply split (later slice) continues
+// with.
 std::expected<RunPlan, SyscallRunFailure> build_run_plan(const PreparedGuest& guest,
                                                          const GuestFacts& facts,
                                                          const SyscallRunOptions& options);

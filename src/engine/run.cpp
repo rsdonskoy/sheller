@@ -160,13 +160,10 @@ assemble_run_state(PreparedGuest& guest, const SyscallRunOptions& options, const
 
     // Heap/Ldr family interception, the intercept identity tables, the stub
     // counting table and the boundary-trap adjudication are decided by
-    // build_run_plan; the state only receives their result below.
+    // build_run_plan; the state only receives their result from here on.
     state.fidelity_dispatch = options.windows_fidelity_dispatch;
-    // Resolve each intercept's export name and
-    // owning region-map module index for event emission. Every loader-route
-    // export that is NOT intercepted is a deterministic stub - those join
-    // the counting table (hook bumps a slot counter; the run end drains
-    // once into options.stub_sink, off the hot path).
+    // The stub-call side table: the counting hooks bump a slot counter and the
+    // run end drains the slots once into this sink, off the hot path.
     state.stub_sink = options.stub_sink;
     // Number <-> Nt name were resolved once as read-only facts
     // (snapshot_guest_facts): real ntdll stubs only, so synthetic 0x1000+

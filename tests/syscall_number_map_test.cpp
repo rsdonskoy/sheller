@@ -24,13 +24,14 @@ namespace syscalls = sheller::syscalls;
 
 using sheller_test::build_fake_ntdll;
 using sheller_test::kNtdllBase;
+using sheller_test::kNtdllImageSize;
 
 class SyscallNumberMap : public testing::Test {
   protected:
     void SetUp() override
     {
         ASSERT_EQ(uc_open(UC_ARCH_X86, UC_MODE_64, &uc_), UC_ERR_OK);
-        ASSERT_EQ(uc_mem_map(uc_, kNtdllBase, 0x4000, UC_PROT_ALL), UC_ERR_OK);
+        ASSERT_EQ(uc_mem_map(uc_, kNtdllBase, kNtdllImageSize, UC_PROT_ALL), UC_ERR_OK);
         const auto image = build_fake_ntdll();
         ASSERT_EQ(uc_mem_write(uc_, kNtdllBase, image.data(), image.size()), UC_ERR_OK);
     }

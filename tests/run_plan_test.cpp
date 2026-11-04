@@ -235,6 +235,8 @@ TEST(RunPlan, LayoutCursorsArePerModeAndDisjoint)
                              layout.stack_base, layout.stack_base + layout.stack_size));
         EXPECT_TRUE(disjoint(layout.heap_base, layout.heap_base + layout.heap_size, layout.env_base,
                              layout.env_base + layout.env_block_size));
+        EXPECT_TRUE(disjoint(layout.stack_base, layout.stack_base + layout.stack_size,
+                             layout.env_base, layout.env_base + layout.env_block_size));
     }
     EXPECT_NE(engine::kLayout64.alloc_base, engine::kLayout86.alloc_base);
     EXPECT_NE(engine::kLayout64.heap_base, engine::kLayout86.heap_base);
