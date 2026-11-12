@@ -56,13 +56,18 @@ def load_module(path):
     if not exports:
         fail("%s: the exports list is empty" % path.name)
     stem = name[:-4].capitalize()
-    # two files may cover the same module+arch with different rule sets
-    # (e.g. the fixture build and a real Windows build) — disambiguate by
-    # the file name so both arrays coexist
-    suffix = ""
-    stem_lower = path.stem.lower()
-    if stem_lower.endswith(".real"):
-        suffix = "Real"
+    # two or more files may cover the same module+arch with different rule
+    # sets (e.g. the fixture build and real Windows builds) — disambiguate
+    # by the file name so all arrays coexist: the file name's remainder
+    # after "<module>.<arch>" becomes the CamelCase suffix ("real" keeps
+    # producing "Real", matching the original two-file spelling)
+    prefix = "%s.%s" % (name[:-4], arch)
+    remainder = path.stem.lower()
+    if remainder.startswith(prefix):
+        remainder = remainder[len(prefix):].lstrip(".")
+    else:
+        remainder = ""
+    suffix = "".join(part.capitalize() for part in remainder.split(".")) if remainder else ""
     ident = "k%s%s%s" % (stem, "X64" if arch == "x64" else "X86", suffix)
 
     image_rows = []
