@@ -62,9 +62,9 @@ TEST(BoundarySeed, GenerationIsDeterministicAndFresh)
 
 TEST(BoundarySeed, CommittedTableBindsTheFixtureImage)
 {
-    // two registered builds for ntdll.dll/x64: the fixture corpus and a real
-    // Windows build (each with its own export rows, selected by hash)
-    ASSERT_EQ(std::size(seed::kModules), 2u);
+    // three registered builds for ntdll.dll/x64: the fixture corpus and two
+    // real Windows builds (each with its own export rows, selected by hash)
+    ASSERT_EQ(std::size(seed::kModules), 3u);
     const auto& ntdll = seed::kModules[0];
     EXPECT_STREQ(ntdll.module, "ntdll.dll");
     EXPECT_STREQ(ntdll.arch, "x64");
@@ -80,4 +80,14 @@ TEST(BoundarySeed, CommittedTableBindsTheFixtureImage)
     // unnamed exports carry an empty name and their ordinal
     EXPECT_STREQ(ntdll.exports[6].name, "");
     EXPECT_EQ(ntdll.exports[6].ordinal, 5u);
+
+    // the two real builds keep their provenance notes describing the build
+    ASSERT_EQ(seed::kModules[1].image_count, 1u);
+    EXPECT_EQ(seed::kModules[1].images[0].xxhash64, 0xde055585ba0729d4ULL);
+    ASSERT_EQ(seed::kModules[1].export_count, 2523u);
+    ASSERT_EQ(seed::kModules[2].image_count, 1u);
+    EXPECT_EQ(seed::kModules[2].images[0].xxhash64, 0xabfab64c572b14f7ULL);
+    ASSERT_EQ(seed::kModules[2].export_count, 2367u);
+    EXPECT_STREQ(seed::kModules[2].module, "ntdll.dll");
+    EXPECT_STREQ(seed::kModules[2].arch, "x64");
 }

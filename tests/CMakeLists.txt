@@ -828,6 +828,21 @@ endif()
   sheller_apply_common(apiset_map_test)
   add_test(NAME apiset_map COMMAND apiset_map_test)
 
+  # API Set evidence tool: the
+  # derivation's honesty contract over synthetic system directories -
+  # forwarder slot names count while forward target names do not, forward
+  # reachability is judged against the scanned set, unconfirmed contracts
+  # keep the reviewed map withheld, and recorded review unlocks it only
+  # when the claimed host truly covers the observed functions.
+  add_executable(apiset_evidence_test apiset_evidence_test.cpp)
+  target_compile_definitions(apiset_evidence_test PRIVATE
+    APISET_EVIDENCE_SCRIPT="${CMAKE_CURRENT_SOURCE_DIR}/../tools/gen_apiset_evidence_map.py"
+    APISET_EVIDENCE_CHECK="${CMAKE_CURRENT_SOURCE_DIR}/../tests/apiset_evidence_check.py"
+    APISET_PYTHON="${Python3_EXECUTABLE}")
+  target_link_libraries(apiset_evidence_test PRIVATE GTest::gtest_main)
+  sheller_apply_common(apiset_evidence_test)
+  add_test(NAME apiset_evidence COMMAND apiset_evidence_test)
+
   # Directory-mode loader route: the strict
   # source tiers over a user directory - derived boundary pair, real-byte
   # modules, required anchored API Set map, named closure rejections, the

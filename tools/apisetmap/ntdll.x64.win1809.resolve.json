@@ -1,0 +1,210 @@
+{
+ "api-ms-win-core-apiquery-l1-1-0": {
+  "basis": "observed subset is 1 real bodies in ntdll.dll",
+  "host": "ntdll.dll"
+ },
+ "api-ms-win-core-appcompat-l1-1-0": {
+  "basis": "observed subset is 7 real bodies in kernelbase.dll; other covering host(s) kernel32.dll redirect elsewhere or duplicate bodies",
+  "host": "kernelbase.dll"
+ },
+ "api-ms-win-core-comm-l1-1-0": {
+  "basis": "observed subset is 18 real bodies in kernelbase.dll; other covering host(s) kernel32.dll redirect elsewhere or duplicate bodies",
+  "host": "kernelbase.dll"
+ },
+ "api-ms-win-core-console-l1-2-0": {
+  "basis": "observed subset is 4 real bodies in kernelbase.dll; other covering host(s) kernel32.dll redirect elsewhere or duplicate bodies",
+  "host": "kernelbase.dll"
+ },
+ "api-ms-win-core-datetime-l1-1-0": {
+  "basis": "observed subset is 4 real bodies in kernelbase.dll; other covering host(s) kernel32.dll redirect elsewhere or duplicate bodies",
+  "host": "kernelbase.dll"
+ },
+ "api-ms-win-core-datetime-l1-1-1": {
+  "basis": "observed subset is 2 real bodies in kernelbase.dll; other covering host(s) kernel32.dll redirect elsewhere or duplicate bodies",
+  "host": "kernelbase.dll"
+ },
+ "api-ms-win-core-debug-l1-1-0": {
+  "basis": "observed subset is 4 real bodies in kernelbase.dll; other covering host(s) kernel32.dll redirect elsewhere or duplicate bodies",
+  "host": "kernelbase.dll"
+ },
+ "api-ms-win-core-debug-l1-1-1": {
+  "basis": "observed subset is 5 real bodies in kernelbase.dll; other covering host(s) kernel32.dll redirect elsewhere or duplicate bodies",
+  "host": "kernelbase.dll"
+ },
+ "api-ms-win-core-delayload-l1-1-0": {
+  "basis": "observed subset is 1 real bodies in kernelbase.dll; other covering host(s) kernel32.dll redirect elsewhere or duplicate bodies",
+  "host": "kernelbase.dll"
+ },
+ "api-ms-win-core-errorhandling-l1-1-0": {
+  "basis": "observed subset is 6 real bodies+1 reachable forwarding slots in kernelbase.dll; other covering host(s) kernel32.dll redirect elsewhere or duplicate bodies",
+  "host": "kernelbase.dll"
+ },
+ "api-ms-win-core-fibers-l1-1-0": {
+  "basis": "observed subset is 4 real bodies in kernelbase.dll; other covering host(s) kernel32.dll redirect elsewhere or duplicate bodies",
+  "host": "kernelbase.dll"
+ },
+ "api-ms-win-core-fibers-l2-1-0": {
+  "basis": "observed subset is 5 real bodies in kernelbase.dll; other covering host(s) kernel32.dll redirect elsewhere or duplicate bodies",
+  "host": "kernelbase.dll"
+ },
+ "api-ms-win-core-file-l1-1-0": {
+  "basis": "observed subset is 72 real bodies in kernelbase.dll; other covering host(s) kernel32.dll redirect elsewhere or duplicate bodies",
+  "host": "kernelbase.dll"
+ },
+ "api-ms-win-core-file-l1-2-0": {
+  "basis": "observed subset is 3 real bodies in kernelbase.dll; other covering host(s) kernel32.dll redirect elsewhere or duplicate bodies",
+  "host": "kernelbase.dll"
+ },
+ "api-ms-win-core-file-l1-2-1": {
+  "basis": "observed subset is 3 real bodies in kernelbase.dll; other covering host(s) kernel32.dll redirect elsewhere or duplicate bodies",
+  "host": "kernelbase.dll"
+ },
+ "api-ms-win-core-file-l1-2-2": {
+  "basis": "observed subset is 6 real bodies in kernelbase.dll; other covering host(s) kernel32.dll redirect elsewhere or duplicate bodies",
+  "host": "kernelbase.dll"
+ },
+ "api-ms-win-core-file-l2-1-0": {
+  "basis": "observed subset is 11 real bodies in kernelbase.dll; other covering host(s) kernel32.dll redirect elsewhere or duplicate bodies",
+  "host": "kernelbase.dll"
+ },
+ "api-ms-win-core-file-l2-1-1": {
+  "basis": "observed subset is 1 real bodies in kernelbase.dll; other covering host(s) kernel32.dll redirect elsewhere or duplicate bodies",
+  "host": "kernelbase.dll"
+ },
+ "api-ms-win-core-file-l2-1-2": {
+  "basis": "observed subset is 2 real bodies in kernelbase.dll; other covering host(s) kernel32.dll redirect elsewhere or duplicate bodies",
+  "host": "kernelbase.dll"
+ },
+ "api-ms-win-core-interlocked-l1-1-0": {
+  "basis": "both covering hosts answer only via forwarding slots; forward targets are ntdll Rtl bodies under different spellings (ntdll does not export these names); kernelbase.dll selected as carrier, consistent with every schema-confirmed core contract in this report",
+  "host": "kernelbase.dll"
+ },
+ "api-ms-win-core-io-l1-1-0": {
+  "basis": "observed subset is 7 real bodies in kernelbase.dll; other covering host(s) kernel32.dll redirect elsewhere or duplicate bodies",
+  "host": "kernelbase.dll"
+ },
+ "api-ms-win-core-libraryloader-l1-1-0": {
+  "basis": "observed subset is 7 real bodies in kernelbase.dll; other covering host(s) kernel32.dll redirect elsewhere or duplicate bodies",
+  "host": "kernelbase.dll"
+ },
+ "api-ms-win-core-libraryloader-l1-2-0": {
+  "basis": "observed subset is 24 real bodies in kernelbase.dll; other covering host(s) kernel32.dll redirect elsewhere or duplicate bodies",
+  "host": "kernelbase.dll"
+ },
+ "api-ms-win-core-libraryloader-l1-2-1": {
+  "basis": "observed subset is 3 real bodies in kernelbase.dll; other covering host(s) kernel32.dll redirect elsewhere or duplicate bodies",
+  "host": "kernelbase.dll"
+ },
+ "api-ms-win-core-localization-l1-2-0": {
+  "basis": "observed subset is 54 real bodies in kernelbase.dll; other covering host(s) kernel32.dll redirect elsewhere or duplicate bodies",
+  "host": "kernelbase.dll"
+ },
+ "api-ms-win-core-memory-l1-1-0": {
+  "basis": "observed subset is 16 real bodies in kernelbase.dll; other covering host(s) kernel32.dll redirect elsewhere or duplicate bodies",
+  "host": "kernelbase.dll"
+ },
+ "api-ms-win-core-memory-l1-1-1": {
+  "basis": "observed subset is 12 real bodies in kernelbase.dll; other covering host(s) kernel32.dll redirect elsewhere or duplicate bodies",
+  "host": "kernelbase.dll"
+ },
+ "api-ms-win-core-memory-l1-1-2": {
+  "basis": "observed subset is 8 real bodies in kernelbase.dll; other covering host(s) kernel32.dll redirect elsewhere or duplicate bodies",
+  "host": "kernelbase.dll"
+ },
+ "api-ms-win-core-namedpipe-l1-2-1": {
+  "basis": "observed subset is 1 real bodies in kernelbase.dll; other covering host(s) kernel32.dll redirect elsewhere or duplicate bodies",
+  "host": "kernelbase.dll"
+ },
+ "api-ms-win-core-processenvironment-l1-1-0": {
+  "basis": "observed subset is 21 real bodies in kernelbase.dll; other covering host(s) kernel32.dll redirect elsewhere or duplicate bodies",
+  "host": "kernelbase.dll"
+ },
+ "api-ms-win-core-processthreads-l1-1-0": {
+  "basis": "observed subset is 43 real bodies+2 reachable forwarding slots in kernelbase.dll; other covering host(s) kernel32.dll redirect elsewhere or duplicate bodies",
+  "host": "kernelbase.dll"
+ },
+ "api-ms-win-core-processthreads-l1-1-1": {
+  "basis": "observed subset is 11 real bodies in kernelbase.dll; other covering host(s) kernel32.dll redirect elsewhere or duplicate bodies",
+  "host": "kernelbase.dll"
+ },
+ "api-ms-win-core-processthreads-l1-1-2": {
+  "basis": "observed subset is 6 real bodies in kernelbase.dll; other covering host(s) kernel32.dll redirect elsewhere or duplicate bodies",
+  "host": "kernelbase.dll"
+ },
+ "api-ms-win-core-realtime-l1-1-0": {
+  "basis": "observed subset is 4 real bodies+1 reachable forwarding slots in kernelbase.dll; other covering host(s) kernel32.dll redirect elsewhere or duplicate bodies",
+  "host": "kernelbase.dll"
+ },
+ "api-ms-win-core-registry-l1-1-0": {
+  "basis": "observed subset is 42 real bodies in kernelbase.dll",
+  "host": "kernelbase.dll"
+ },
+ "api-ms-win-core-rtlsupport-l1-1-0": {
+  "basis": "observed subset is 13 real bodies in ntdll.dll; other covering host(s) kernel32.dll redirect elsewhere or duplicate bodies",
+  "host": "ntdll.dll"
+ },
+ "api-ms-win-core-synch-l1-1-0": {
+  "basis": "observed subset is 27 real bodies+4 reachable forwarding slots in kernelbase.dll; other covering host(s) kernel32.dll redirect elsewhere or duplicate bodies",
+  "host": "kernelbase.dll"
+ },
+ "api-ms-win-core-synch-l1-2-0": {
+  "basis": "observed subset is 5 real bodies+1 reachable forwarding slots in kernelbase.dll; other covering host(s) kernel32.dll redirect elsewhere or duplicate bodies",
+  "host": "kernelbase.dll"
+ },
+ "api-ms-win-core-sysinfo-l1-1-0": {
+  "basis": "observed subset is 17 real bodies in kernelbase.dll; other covering host(s) kernel32.dll redirect elsewhere or duplicate bodies",
+  "host": "kernelbase.dll"
+ },
+ "api-ms-win-core-sysinfo-l1-2-0": {
+  "basis": "observed subset is 7 real bodies in kernelbase.dll; other covering host(s) kernel32.dll redirect elsewhere or duplicate bodies",
+  "host": "kernelbase.dll"
+ },
+ "api-ms-win-core-sysinfo-l1-2-1": {
+  "basis": "observed subset is 3 real bodies in kernelbase.dll; other covering host(s) kernel32.dll redirect elsewhere or duplicate bodies",
+  "host": "kernelbase.dll"
+ },
+ "api-ms-win-core-sysinfo-l1-2-3": {
+  "basis": "observed subset is 3 real bodies in kernelbase.dll; other covering host(s) kernel32.dll redirect elsewhere or duplicate bodies",
+  "host": "kernelbase.dll"
+ },
+ "api-ms-win-core-systemtopology-l1-1-0": {
+  "basis": "observed subset is 2 real bodies in kernelbase.dll; other covering host(s) kernel32.dll redirect elsewhere or duplicate bodies",
+  "host": "kernelbase.dll"
+ },
+ "api-ms-win-core-timezone-l1-1-0": {
+  "basis": "observed subset is 9 real bodies in kernelbase.dll; other covering host(s) kernel32.dll redirect elsewhere or duplicate bodies",
+  "host": "kernelbase.dll"
+ },
+ "api-ms-win-core-util-l1-1-0": {
+  "basis": "beep is a duplicated real body in kernel32 and kernelbase (either host answers); encodepointer forwards identically on both; kernelbase.dll selected as carrier, consistent with every schema-confirmed core contract in this report",
+  "host": "kernelbase.dll"
+ },
+ "api-ms-win-core-windowserrorreporting-l1-1-0": {
+  "basis": "observed subset is 8 real bodies in kernelbase.dll; other covering host(s) kernel32.dll redirect elsewhere or duplicate bodies",
+  "host": "kernelbase.dll"
+ },
+ "api-ms-win-core-windowserrorreporting-l1-1-1": {
+  "basis": "observed subset is 6 real bodies in kernelbase.dll; other covering host(s) kernel32.dll redirect elsewhere or duplicate bodies",
+  "host": "kernelbase.dll"
+ },
+ "api-ms-win-core-wow64-l1-1-0": {
+  "basis": "observed subset is 3 real bodies in kernelbase.dll; other covering host(s) kernel32.dll redirect elsewhere or duplicate bodies",
+  "host": "kernelbase.dll"
+ },
+ "api-ms-win-core-wow64-l1-1-1": {
+  "basis": "observed subset is 4 real bodies in kernelbase.dll",
+  "host": "kernelbase.dll"
+ },
+ "api-ms-win-core-xstate-l2-1-0": {
+  "basis": "observed subset is 6 real bodies in kernelbase.dll; other covering host(s) kernel32.dll redirect elsewhere or duplicate bodies",
+  "host": "kernelbase.dll"
+ },
+ "api-ms-win-security-base-l1-1-0": {
+  "basis": "observed subset is 8 real bodies+1 jmp-thunks into this host in kernelbase.dll",
+  "host": "kernelbase.dll"
+ },
+ "api-ms-win-security-base-l1-2-0": {
+  "basis": "observed subset is 7 real bodies in kernelbase.dll; other covering host(s) kernel32.dll redirect elsewhere or duplicate bodies",
+  "host": "kernelbase.dll"
+ }
+}

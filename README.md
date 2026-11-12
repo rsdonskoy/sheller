@@ -124,12 +124,18 @@ Strictness is the contract: a closure member the directory lacks is a named
 construction rejection, and `--system-modules-fallback` opts into pulling such
 members from the synthetic directory (marked in the module source table).
 Classification follows a versioned boundary manifest
-(`tools/boundary_manifest/*.json`, hash-bound to the covered builds); an
+(`tools/boundary_manifest/*.json`, hash-bound to the covered builds: the
+fixture corpus, a local Windows build, and Windows 10 1809/LTSC 2019); an
 export outside the manifest is rejected by name, an unsupported function
 becomes a `boundary-trap` stop (a named diagnosis in the report, never a fake
 success), manifest-declared compat stubs answer per-function and are counted,
 and API Set resolution uses the directory's own `apiset-map.bin` (no
-`api-ms-*` prefix guessing). Resident real modules bind their own IATs at
+`api-ms-*` prefix guessing). The map sources (`tools/apisetmap/*.json`, two
+real builds shipped) are derived with their per-contract evidence by
+`tools/gen_apiset_evidence_map.py` - hosts confirmed by the build's
+same-source API Set schema or recorded review, never a silent pick (see
+`tools/apisetmap/README.md` for the regeneration and adjudication method).
+Resident real modules bind their own IATs at
 construction; no resident module runs DllMain, TLS callbacks or any entry
 initialization - the supported surface is the verified no-init-dependency
 call paths, and unrepaired paths may crash or misbehave (that is a

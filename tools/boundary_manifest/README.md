@@ -55,3 +55,17 @@ Applicability: a directory file is derived only when its whole-file
 xxhash64 (seed 0) appears in `images` for its folded module name and
 architecture; anything else is a named construction rejection - the
 manifest never guesses across a version drift.
+
+## Sources in this directory
+
+| file | build | anchor (whole-file xxhash64) |
+|---|---|---|
+| `ntdll.x64.json` | fixture corpus (`tests/boundary_fixture.h` image) | `0x6c806f42b18c5f46` |
+| `ntdll.x64.real.json` | local Windows build x64 System32 ntdll | `0xde055585ba0729d4` |
+| `ntdll.x64.win1809.json` | Windows 10 1809/LTSC 2019 (build 17763) x64 System32 ntdll | `0xabfab64c572b14f7` |
+
+File names describe the build, never the collection machine; the seed
+compiler disambiguates multiple manifests per (module, arch) by the file
+name's remainder after `<module>.<arch>`. Regenerate the seed after any
+manifest change:
+`python tools/gen_boundary_seed.py tools/boundary_manifest src/engine/boundary_seed.inc`
