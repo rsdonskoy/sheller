@@ -93,11 +93,11 @@ struct PeSectionDef {
 // A minimal PE32+ image with optional reloc (DIR64 entries at page 0x4000)
 // and import (descriptor at 0x2780, IAT slots at 0x2800, imported-module
 // name spelled at 0x2820) directories.
-std::vector<std::uint8_t> build_pe_image(
-    std::uint32_t image_size, const std::vector<PeSectionDef>& sections,
-    const std::vector<std::uint32_t>& reloc_qwords,
-    const std::vector<std::pair<std::uint32_t, std::uint64_t>>& iat_slots,
-    std::string_view import_name = "ntdll.dll")
+std::vector<std::uint8_t>
+build_pe_image(std::uint32_t image_size, const std::vector<PeSectionDef>& sections,
+               const std::vector<std::uint32_t>& reloc_qwords,
+               const std::vector<std::pair<std::uint32_t, std::uint64_t>>& iat_slots,
+               std::string_view import_name = "ntdll.dll")
 {
     std::vector<std::uint8_t> image(image_size, std::uint8_t{0});
     image[0] = 'M';
@@ -214,8 +214,7 @@ std::vector<std::uint8_t> build_ldr_area(std::uint64_t area_va,
             }
             max_len = static_cast<std::uint16_t>(raw.size() + 2);
         }
-        std::copy(raw.begin(), raw.end(),
-                  area.begin() + static_cast<std::ptrdiff_t>(block + 0x80));
+        std::copy(raw.begin(), raw.end(), area.begin() + static_cast<std::ptrdiff_t>(block + 0x80));
         const std::uint64_t buffer_va = area_va + block + 0x80;
         put_u16(area, block + 0x48, static_cast<std::uint16_t>(raw.size()));
         put_u16(area, block + 0x4A, max_len);
@@ -239,20 +238,20 @@ struct RegionDef {
 // contract - see AlignClassifiesEveryCauseClass below. break_teb_self zeroes
 // the crafted TEB's Self field so the self-check entries have something to
 // find (used by the interest side-matching test).
-void write_fixture_world(const fs::path& path, bool crafted, bool include_kusd,
-                         const std::optional<std::pair<std::string, std::vector<std::uint8_t>>>&
-                             pending,
-                         bool break_teb_self = false)
+void write_fixture_world(
+    const fs::path& path, bool crafted, bool include_kusd,
+    const std::optional<std::pair<std::string, std::vector<std::uint8_t>>>& pending,
+    bool break_teb_self = false)
 {
-    std::vector<std::uint8_t> ntdll = build_pe_image(
-        0x6000,
-        {{".text", 0x1000, 0x1000}, {".rdata", 0x2000, 0x1000},
-         {".data", 0x3000, 0x1000}, {".reloc", 0x4000, 0x1000}},
-        {0x1000, 0x1008}, {});
-    std::vector<std::uint8_t> k32 = build_pe_image(
-        0x3000, {{".text", 0x1000, 0x1000}, {".data", 0x2000, 0x1000}}, {}, {});
-    std::vector<std::uint8_t> w32u =
-        build_pe_image(0x2000, {{".text", 0x1000, 0x1000}}, {}, {});
+    std::vector<std::uint8_t> ntdll = build_pe_image(0x6000,
+                                                     {{".text", 0x1000, 0x1000},
+                                                      {".rdata", 0x2000, 0x1000},
+                                                      {".data", 0x3000, 0x1000},
+                                                      {".reloc", 0x4000, 0x1000}},
+                                                     {0x1000, 0x1008}, {});
+    std::vector<std::uint8_t> k32 =
+        build_pe_image(0x3000, {{".text", 0x1000, 0x1000}, {".data", 0x2000, 0x1000}}, {}, {});
+    std::vector<std::uint8_t> w32u = build_pe_image(0x2000, {{".text", 0x1000, 0x1000}}, {}, {});
     std::vector<std::uint8_t> wmi = build_pe_image(0x2000, {{".text", 0x1000, 0x1000}}, {}, {});
     // tailmod: .tail's virtual size is not qword-aligned (0x1004) and the
     // crafted copy differs only in the last byte - the sub-qword residual
@@ -280,40 +279,32 @@ void write_fixture_world(const fs::path& path, bool crafted, bool include_kusd,
         teb = kCapTeb;
         image_base = kCapImageBase;
         narrow = false;
-        modules = {{"ntdll.dll", kCapNtdll, 0x6000},
-                   {"kernel32.dll", kCapK32, 0x3000},
-                   {"win32u.dll", kCapW32u, 0x2000},
-                   {"tailmod.dll", kCapTail, 0x4000},
-                   {"intended.dll", kCapIntended, 0x2000},
-                   {"unrelated.dll", kCapUnrelated, 0x2000},
-                   {"importer.dll", kCapImporter, 0x3000},
-                   {"importer_bad.dll", kCapImporterBad, 0x3000}};
+        modules = {
+            {"ntdll.dll", kCapNtdll, 0x6000},       {"kernel32.dll", kCapK32, 0x3000},
+            {"win32u.dll", kCapW32u, 0x2000},       {"tailmod.dll", kCapTail, 0x4000},
+            {"intended.dll", kCapIntended, 0x2000}, {"unrelated.dll", kCapUnrelated, 0x2000},
+            {"importer.dll", kCapImporter, 0x3000}, {"importer_bad.dll", kCapImporterBad, 0x3000}};
         // relocation-covered qwords: one carrying the base delta, one fixed;
         // IAT slots bound inside the capture world's ntdll span
-        ntdll = build_pe_image(
-            0x6000,
-            {{".text", 0x1000, 0x1000}, {".rdata", 0x2000, 0x1000},
-             {".data", 0x3000, 0x1000}, {".reloc", 0x4000, 0x1000}},
-            {0x1000, 0x1008},
-            {{0x2800, kCapNtdll + 0x1000}, {0x2808, kCapNtdll + 0x800}});
+        ntdll = build_pe_image(0x6000,
+                               {{".text", 0x1000, 0x1000},
+                                {".rdata", 0x2000, 0x1000},
+                                {".data", 0x3000, 0x1000},
+                                {".reloc", 0x4000, 0x1000}},
+                               {0x1000, 0x1008},
+                               {{0x2800, kCapNtdll + 0x1000}, {0x2808, kCapNtdll + 0x800}});
         put_u64(ntdll, 0x1000, kCapNtdll + 0x2000);
         put_u64(ntdll, 0x1008, 0x2222222222222222);
         // importer: both slots claim intended.dll; both capture bindings sit
         // in the capture world's intended span
         std::vector<std::uint8_t> importer = build_pe_image(
-            0x3000,
-            {{".text", 0x1000, 0x1000}, {".rdata", 0x2000, 0x1000}},
-            {},
-            {{0x2800, kCapIntended + 0x1000}, {0x2808, kCapIntended + 0x800}},
-            "intended.dll");
+            0x3000, {{".text", 0x1000, 0x1000}, {".rdata", 0x2000, 0x1000}}, {},
+            {{0x2800, kCapIntended + 0x1000}, {0x2808, kCapIntended + 0x800}}, "intended.dll");
         // importer_bad: its descriptor's Name RVA leaves the image, so the
         // slot identity is unreadable - a diff there is cause-uncertain
         std::vector<std::uint8_t> importer_bad = build_pe_image(
-            0x3000,
-            {{".text", 0x1000, 0x1000}, {".rdata", 0x2000, 0x1000}},
-            {},
-            {{0x2800, kCapIntended + 0x1000}, {0x2808, kCapIntended + 0x800}},
-            "intended.dll");
+            0x3000, {{".text", 0x1000, 0x1000}, {".rdata", 0x2000, 0x1000}}, {},
+            {{0x2800, kCapIntended + 0x1000}, {0x2808, kCapIntended + 0x800}}, "intended.dll");
         put_u32(importer_bad, 0x278C, 0x7FFFFFFF);
         regions.push_back({kCapNtdll, 0x20, kMemImage, ntdll});
         regions.push_back({kCapK32, 0x20, kMemImage, k32});
@@ -337,12 +328,13 @@ void write_fixture_world(const fs::path& path, bool crafted, bool include_kusd,
                    {"unrelated.dll", kCraUnrelated, 0x2000},
                    {"importer.dll", kCraImporter, 0x3000},
                    {"importer_bad.dll", kCraImporterBad, 0x3000}};
-        ntdll = build_pe_image(
-            0x6000,
-            {{".text", 0x1000, 0x1000}, {".rdata", 0x2000, 0x1000},
-             {".data", 0x3000, 0x1000}, {".reloc", 0x4000, 0x1000}},
-            {0x1000, 0x1008},
-            {{0x2800, kCraNtdll + 0x1000}, {0x2808, 0x1234567812345678}});
+        ntdll = build_pe_image(0x6000,
+                               {{".text", 0x1000, 0x1000},
+                                {".rdata", 0x2000, 0x1000},
+                                {".data", 0x3000, 0x1000},
+                                {".reloc", 0x4000, 0x1000}},
+                               {0x1000, 0x1008},
+                               {{0x2800, kCraNtdll + 0x1000}, {0x2808, 0x1234567812345678}});
         put_u64(ntdll, 0x1000, kCraNtdll + 0x2000);
         put_u64(ntdll, 0x1008, 0x4444444444444444); // relocation anomaly
         ntdll[0x3005] = 0xAA;                       // the one-byte .data diff
@@ -350,17 +342,11 @@ void write_fixture_world(const fs::path& path, bool crafted, bool include_kusd,
         // binds into unrelated - a wrong-module target is an anomaly even
         // though it lands inside SOME loaded module
         std::vector<std::uint8_t> importer = build_pe_image(
-            0x3000,
-            {{".text", 0x1000, 0x1000}, {".rdata", 0x2000, 0x1000}},
-            {},
-            {{0x2800, kCraIntended + 0x1000}, {0x2808, kCraUnrelated + 0x800}},
-            "intended.dll");
+            0x3000, {{".text", 0x1000, 0x1000}, {".rdata", 0x2000, 0x1000}}, {},
+            {{0x2800, kCraIntended + 0x1000}, {0x2808, kCraUnrelated + 0x800}}, "intended.dll");
         std::vector<std::uint8_t> importer_bad = build_pe_image(
-            0x3000,
-            {{".text", 0x1000, 0x1000}, {".rdata", 0x2000, 0x1000}},
-            {},
-            {{0x2800, kCraIntended + 0x1000}, {0x2808, kCraIntended + 0x400}},
-            "intended.dll");
+            0x3000, {{".text", 0x1000, 0x1000}, {".rdata", 0x2000, 0x1000}}, {},
+            {{0x2800, kCraIntended + 0x1000}, {0x2808, kCraIntended + 0x400}}, "intended.dll");
         put_u32(importer_bad, 0x278C, 0x7FFFFFFF);
         regions.push_back({kCraNtdll, 0x20, kMemImage, ntdll});
         regions.push_back({kCraK32, 0x20, kMemImage, k32});
@@ -401,8 +387,8 @@ void write_fixture_world(const fs::path& path, bool crafted, bool include_kusd,
 
     if (!crafted) {
         const std::uint64_t area_va = kCapHeap;
-        regions.push_back({kCapHeap, kPageReadwrite, kMemPrivate,
-                           build_ldr_area(area_va, modules, narrow)});
+        regions.push_back(
+            {kCapHeap, kPageReadwrite, kMemPrivate, build_ldr_area(area_va, modules, narrow)});
         std::vector<std::uint8_t> peb_page(0x1000, std::uint8_t{0});
         put_u64(peb_page, 0x10, image_base);
         put_u64(peb_page, 0x18, area_va);
@@ -435,9 +421,9 @@ void write_fixture_world(const fs::path& path, bool crafted, bool include_kusd,
 
     std::ostringstream out;
     snapshot::Writer writer{out};
-    EXPECT_TRUE(writer.write_header(snapshot::Header{
-        .version = pending.has_value() ? snapshot::kVersionV2 : snapshot::kVersion,
-        .bitness = snapshot::kBitness64}));
+    EXPECT_TRUE(writer.write_header(
+        snapshot::Header{.version = pending.has_value() ? snapshot::kVersionV2 : snapshot::kVersion,
+                         .bitness = snapshot::kBitness64}));
     snapshot::Registers registers{};
     registers.rip = image_base + 0x1000;
     registers.rflags = 0x246;
@@ -456,14 +442,13 @@ void write_fixture_world(const fs::path& path, bool crafted, bool include_kusd,
                                       .content = region.content.empty()
                                                      ? snapshot::kContentAbsent
                                                      : snapshot::kContentPresent};
-        EXPECT_TRUE(writer.write_region(
-            header, region.content.empty() ? nullptr : region.content.data()));
+        EXPECT_TRUE(
+            writer.write_region(header, region.content.empty() ? nullptr : region.content.data()));
     }
     EXPECT_TRUE(writer.finalize_region_count());
     if (pending.has_value()) {
-        snapshot::PendingModule module{.name = pending->first,
-                                       .bitness = snapshot::kBitness64,
-                                       .bytes = pending->second};
+        snapshot::PendingModule module{
+            .name = pending->first, .bitness = snapshot::kBitness64, .bytes = pending->second};
         EXPECT_TRUE(writer.write_pending(module));
     }
     const std::string bytes = out.str();
@@ -492,8 +477,7 @@ struct RunResult {
 RunResult run_command(const std::string& command)
 {
     const auto log_path = sheller_test::temp_path("world_diff_run_log");
-    const std::string line =
-        command + " > \"" + log_path.string() + "\" 2>&1";
+    const std::string line = command + " > \"" + log_path.string() + "\" 2>&1";
     RunResult result;
     result.exit_code = wait_status_code(std::system(line.c_str()));
     std::ifstream in(log_path, std::ios::binary);
@@ -531,8 +515,8 @@ std::string check_json(const std::string& must_include_json,
                        const std::string& expect_json = "{}")
 {
     return "{\"must_include\": " + must_include_json +
-           ", \"must_not_include\": " + must_not_include_json +
-           ", \"expect\": " + expect_json + "}";
+           ", \"must_not_include\": " + must_not_include_json + ", \"expect\": " + expect_json +
+           "}";
 }
 
 fs::path fixture_dir()
@@ -559,10 +543,8 @@ TEST(WorldDiff, AlignClassifiesEveryCauseClass)
                               report.string() + "\"");
     EXPECT_EQ(run.exit_code, 0) << run.log;
 
-    const auto checks = write_text(
-        dir / "checks.json",
-        check_json(
-            R"([
+    const auto checks = write_text(dir / "checks.json", check_json(
+                                                            R"([
               {"domain": "module_set", "classification": "expected", "module": "wmi.dll", "present": "crafted"},
               {"domain": "module_image", "classification": "candidate", "module": "ntdll.dll", "section": ".data", "diff_count": 1},
               {"domain": "module_image", "classification": "expected-reloc", "module": "ntdll.dll", "section": ".text", "diff_count": 1},
@@ -581,10 +563,10 @@ TEST(WorldDiff, AlignClassifiesEveryCauseClass)
               {"domain": "infrastructure", "classification": "candidate", "target": "ldr.load", "detail": "order differs at index 1: capture=kernel32.dll crafted=win32u.dll"},
               {"domain": "infrastructure", "classification": "candidate", "target": "peb.process_heap"}
             ])",
-            R"([
+                                                            R"([
               {"classification": "unresolvable"}
             ])",
-            R"({
+                                                            R"({
               "modules.only_crafted": ["wmi.dll"],
               "inputs.capture.version": 1,
               "inputs.crafted.version": 1
@@ -632,9 +614,9 @@ TEST(WorldDiff, PendingBlockPaths)
     const auto run = run_tool("\"" + cap_v2.string() + "\" \"" + cra_v2.string() +
                               "\" --output \"" + equal_report.string() + "\"");
     EXPECT_EQ(run.exit_code, 0) << run.log;
-    const auto equal_checks = write_text(
-        dir / "pending_equal_checks.json",
-        check_json("[]", R"([{"domain": "pending"}])", R"({"pending.equal": true})"));
+    const auto equal_checks =
+        write_text(dir / "pending_equal_checks.json",
+                   check_json("[]", R"([{"domain": "pending"}])", R"({"pending.equal": true})"));
     const auto equal_check = run_checker(equal_report, equal_checks);
     EXPECT_EQ(equal_check.exit_code, 0) << equal_check.log;
 
@@ -642,9 +624,9 @@ TEST(WorldDiff, PendingBlockPaths)
     const auto run_diff = run_tool("\"" + cap_v2.string() + "\" \"" + cra_diff.string() +
                                    "\" --output \"" + diff_report.string() + "\"");
     EXPECT_EQ(run_diff.exit_code, 0) << run_diff.log;
-    const auto diff_checks = write_text(
-        dir / "pending_diff_checks.json",
-        check_json(R"([{"domain": "pending", "classification": "candidate"}])"));
+    const auto diff_checks =
+        write_text(dir / "pending_diff_checks.json",
+                   check_json(R"([{"domain": "pending", "classification": "candidate"}])"));
     const auto diff_check = run_checker(diff_report, diff_checks);
     EXPECT_EQ(diff_check.exit_code, 0) << diff_check.log;
 }
@@ -664,8 +646,8 @@ TEST(WorldDiff, ReaderRefusalsAreNamed)
     // pending name length is over the format bound
     const auto cap_v2 = dir / "cap_v2_ok.snap";
     const auto cra_v2 = dir / "cra_v2_good.snap";
-    const std::pair<std::string, std::vector<std::uint8_t>> pending = {
-        "packed.dll", {0x4D, 0x5A, 0x00, 0x00}};
+    const std::pair<std::string, std::vector<std::uint8_t>> pending = {"packed.dll",
+                                                                       {0x4D, 0x5A, 0x00, 0x00}};
     ASSERT_NO_FATAL_FAILURE(write_fixture_world(cap_v2, false, true, pending));
     ASSERT_NO_FATAL_FAILURE(write_fixture_world(cra_v2, true, true, pending));
 
@@ -692,13 +674,12 @@ TEST(WorldDiff, ReaderRefusalsAreNamed)
         refusals.push_back({"bad_bitness.snap", copy, "kBitnessMismatch", false});
     }
     refusals.push_back({"truncated.snap",
-                        std::vector<std::uint8_t>(bytes.begin(), bytes.begin() + 100),
-                        "kTruncated", false});
+                        std::vector<std::uint8_t>(bytes.begin(), bytes.begin() + 100), "kTruncated",
+                        false});
     {
         auto copy = read_bytes(cra_v2);
         const std::string marker = "PENDMOD1";
-        const auto at =
-            std::search(copy.begin(), copy.end(), marker.begin(), marker.end());
+        const auto at = std::search(copy.begin(), copy.end(), marker.begin(), marker.end());
         ASSERT_NE(at, copy.end());
         put_u32(copy, static_cast<std::size_t>(at - copy.begin()) + 8, 300);
         refusals.push_back({"cra_bad_pending.snap", copy, "kBadPending", true});
@@ -708,8 +689,7 @@ TEST(WorldDiff, ReaderRefusalsAreNamed)
         const auto path = write_text(dir / refusal.file,
                                      std::string(refusal.content.begin(), refusal.content.end()));
         const auto first = refusal.pairs_with_v2 ? cap_v2.string() : cap.string();
-        const auto run =
-            run_tool("\"" + first + "\" \"" + path + "\"");
+        const auto run = run_tool("\"" + first + "\" \"" + path + "\"");
         EXPECT_NE(run.exit_code, 0) << refusal.file << " accepted: " << run.log;
         EXPECT_NE(run.log.find(refusal.named), std::string::npos)
             << refusal.file << " did not name " << refusal.named << ": " << run.log;
@@ -780,21 +760,19 @@ TEST(WorldDiff, InterestAnnotationStates)
 
     const auto full = write_text(dir / "full_report.json", interest::kFullReport);
     const auto report = dir / "interest_full.json";
-    const auto run = run_tool("\"" + cap.string() + "\" \"" + cra.string() + "\" --interest \"" +
-                              full + "\" --interest-side crafted --output \"" + report.string() +
-                              "\"");
+    const auto run =
+        run_tool("\"" + cap.string() + "\" \"" + cra.string() + "\" --interest \"" + full +
+                 "\" --interest-side crafted --output \"" + report.string() + "\"");
     EXPECT_EQ(run.exit_code, 0) << run.log;
-    const auto full_checks = write_text(
-        dir / "interest_full_checks.json",
-        check_json(
-            R"([
+    const auto full_checks = write_text(dir / "interest_full_checks.json", check_json(
+                                                                               R"([
               {"domain": "module_image", "classification": "candidate", "section": ".data", "interest": true},
               {"domain": "infrastructure", "classification": "expected-volatile", "target": "kusd.systemtime", "interest": true}
             ])",
-            R"([
+                                                                               R"([
               {"target": "kusd.nt_system_root", "interest": true}
             ])",
-            R"({
+                                                                               R"({
               "interest.detail_state": "sufficient",
               "interest.report_level": "full",
               "interest.side": "crafted",
@@ -809,16 +787,14 @@ TEST(WorldDiff, InterestAnnotationStates)
         run_tool("\"" + cap.string() + "\" \"" + cra.string() + "\" --interest \"" + semantic +
                  "\" --interest-side crafted --output \"" + sem_out.string() + "\"");
     EXPECT_EQ(sem_run.exit_code, 0) << sem_run.log;
-    const auto sem_checks = write_text(
-        dir / "interest_sem_checks.json",
-        check_json(
-            R"([
+    const auto sem_checks = write_text(dir / "interest_sem_checks.json", check_json(
+                                                                             R"([
               {"domain": "module_image", "classification": "candidate", "section": ".data", "interest": true}
             ])",
-            R"([
+                                                                             R"([
               {"domain": "infrastructure", "interest": true}
             ])",
-            R"({
+                                                                             R"({
               "interest.report_level": "semantic",
               "interest.detail_state": "sufficient",
               "interest.matched": 1
@@ -832,13 +808,11 @@ TEST(WorldDiff, InterestAnnotationStates)
         run_tool("\"" + cap.string() + "\" \"" + cra.string() + "\" --interest \"" + empty +
                  "\" --interest-side crafted --output \"" + empty_out.string() + "\"");
     EXPECT_EQ(empty_run.exit_code, 0) << empty_run.log;
-    const auto empty_checks = write_text(
-        dir / "interest_empty_checks.json",
-        check_json("[]",
-                   R"([
+    const auto empty_checks = write_text(dir / "interest_empty_checks.json", check_json("[]",
+                                                                                        R"([
                      {"interest": true}
                    ])",
-                   R"({
+                                                                                        R"({
                      "interest.detail_state": "insufficient",
                      "interest.matched": 0
                    })"));
@@ -850,9 +824,9 @@ TEST(WorldDiff, InterestAnnotationStates)
         run_tool("\"" + cap.string() + "\" \"" + cra.string() + "\" --interest \"" + full + "\"");
     EXPECT_NE(no_side.exit_code, 0);
     EXPECT_NE(no_side.log.find("--interest-side"), std::string::npos) << no_side.log;
-    const auto no_file = run_tool("\"" + cap.string() + "\" \"" + cra.string() +
-                                  "\" --interest \"" + (dir / "absent.json").string() +
-                                  "\" --interest-side crafted");
+    const auto no_file =
+        run_tool("\"" + cap.string() + "\" \"" + cra.string() + "\" --interest \"" +
+                 (dir / "absent.json").string() + "\" --interest-side crafted");
     EXPECT_NE(no_file.exit_code, 0);
     EXPECT_NE(no_file.log.find("interest report unreadable"), std::string::npos) << no_file.log;
 }
@@ -876,20 +850,18 @@ TEST(WorldDiff, InterestSelfCheckMatchesOnItsSide)
       ]}})";
     const auto interest = write_text(dir / "teb_report.json", report);
     const auto out = dir / "interest_teb.json";
-    const auto run = run_tool("\"" + cap.string() + "\" \"" + cra.string() + "\" --interest \"" +
-                              interest + "\" --interest-side crafted --output \"" + out.string() +
-                              "\"");
+    const auto run =
+        run_tool("\"" + cap.string() + "\" \"" + cra.string() + "\" --interest \"" + interest +
+                 "\" --interest-side crafted --output \"" + out.string() + "\"");
     EXPECT_EQ(run.exit_code, 0) << run.log;
-    const auto checks = write_text(
-        dir / "teb_checks.json",
-        check_json(
-            R"json([
+    const auto checks =
+        write_text(dir / "teb_checks.json", check_json(
+                                                R"json([
               {"domain": "infrastructure", "classification": "candidate",
                "target": "teb.self(crafted)", "interest": true,
                "actual": "0x0", "expected": "0x330000000"}
             ])json",
-            R"([])",
-            R"({"interest.matched": 1})"));
+                                                R"([])", R"({"interest.matched": 1})"));
     const auto check = run_checker(out, checks);
     EXPECT_EQ(check.exit_code, 0) << check.log;
 }
