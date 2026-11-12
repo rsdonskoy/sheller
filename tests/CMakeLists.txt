@@ -902,6 +902,25 @@ endif()
   add_dependencies(dll_fixture_semantics_test synth_modules)
   add_test(NAME dll_fixture_semantics COMMAND dll_fixture_semantics_test)
 
+  # World diff harness: the Python tool loads engine-written fixture
+  # snapshots (v1 and v2), aligns the worlds by name, classifies every
+  # planted difference (relocation delta, import span, .data byte, KUSD
+  # fields, Ldr chains, module set), refuses the named reader inputs, and
+  # annotates entries from behavior reports at both detail levels.
+  add_executable(world_diff_test world_diff_test.cpp)
+  target_include_directories(world_diff_test PRIVATE
+    "${CMAKE_CURRENT_SOURCE_DIR}"
+    "${CMAKE_CURRENT_SOURCE_DIR}/../include")
+  target_compile_definitions(world_diff_test PRIVATE
+    WORLD_DIFF_TOOL="${CMAKE_CURRENT_SOURCE_DIR}/../tools/world_diff.py"
+    WORLD_DIFF_CHECK="${CMAKE_CURRENT_SOURCE_DIR}/../tests/world_diff_check.py"
+    WORLD_DIFF_PYTHON="${Python3_EXECUTABLE}")
+  target_link_libraries(world_diff_test PRIVATE GTest::gtest_main sheller_capture)
+  sheller_apply_common(world_diff_test)
+  add_test(NAME world_diff COMMAND world_diff_test)
+  add_test(NAME world_diff_regression
+    COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/world_diff_regression.py")
+
   # Linux packed e2e: the packed.exe snapshot (captured on a Windows
   # host) is replayed on the Linux engine, the dump is repaired and the .unp
   # is produced. Skips when the snapshot file has not been transferred.

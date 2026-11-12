@@ -155,6 +155,23 @@ closed-CFG scan over probe windows) records which hot loops would ever qualify f
 host-CPU execution - `SHELLER_LOOP_GATE_TRACE=1` with `--log-level debug` prints
 that audit.
 
+### World diff harness (development tool)
+
+`tools/world_diff.py` is a standalone python-stdlib harness for the crafted-route
+workflow: it reads two snapshots of the same format version (a capture snapshot
+and a crafted container; v1, or v2 with the trailing pending-module block),
+aligns the worlds' modules by Ldr name across differing bases, and renders a
+deterministic JSON report classifying every difference as expected (module set,
+relocation deltas checked against the base delta, import binding checked against
+each side's module spans, KUSD time fields) or as a divergence candidate
+(infrastructure fields, runtime bytes, `.data/.mrdata` initialization) - the
+evidence surface for why a crafted world crashes where the capture world does
+not. `--interest <report.json> --interest-side capture|crafted` annotates entries
+hit by a run's mem-read addresses (a full-level report details infrastructure
+reads too; a semantic-level report details module reads only; a report without
+per-address detail is named insufficient, never silently a no-hit). Same input
+pair, byte-identical report; the engine, CLI and snapshot format are untouched.
+
 ## Input support: bitness, DLLs, shellcode
 
 * **64-bit PE (x64)** - the mainline: captured on Windows, reconstructed into a
