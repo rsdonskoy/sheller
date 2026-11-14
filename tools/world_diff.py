@@ -329,8 +329,13 @@ def _parse_pending(data, offset):
 
 
 def fold_module_name(world, address, length_bytes):
-    """Mirror of the engine's fold_module_name: narrow-ASCII vs UTF-16 told
-    apart by content, folded to lowercase ASCII, '?' for non-ASCII."""
+    """Mirror of the engine's fold_module_name. Current containers store Ldr
+    names as UTF-16 (Length = 2 * characters); containers built before the
+    shared-convention change stored narrow ASCII bytes (Length = the byte
+    count). The two encodings are told apart by content - UTF-16 ASCII text
+    carries a zero high byte on every other byte, the narrow text never does -
+    so the legacy containers' names stay readable. Folded to lowercase ASCII,
+    '?' for non-ASCII."""
     read_count = min(length_bytes, MODULE_NAME_BYTES)
     if read_count == 0:
         return ""

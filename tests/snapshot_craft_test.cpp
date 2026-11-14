@@ -210,11 +210,11 @@ std::optional<std::uint64_t> ldr_entry_for(const ParsedContainer& parsed,
     const auto head = ldr + 0x10;
     auto node = read64(head);
     for (std::size_t i = 0; i < 64 && node != 0 && node != head; ++i) {
-        const auto length = read16(node + 0x58);
+        const auto length = read16(node + 0x58); // bytes: UTF-16LE, 2 per character
         const auto buffer = read64(node + 0x60);
         std::string candidate;
-        candidate.reserve(length);
-        for (std::uint16_t c = 0; c < length; ++c) {
+        candidate.reserve(length / 2);
+        for (std::uint16_t c = 0; c < length; c += 2) {
             candidate.push_back(static_cast<char>(read_virtual(parsed, buffer + c, 1)[0]));
         }
         if (candidate == name) {

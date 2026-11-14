@@ -1578,12 +1578,19 @@ build_loader_world(UnicornEngine& unicorn, const GuestMode mode, const LoadedSys
     // the dispatch Rsp against [TEB.StackLimit, TEB.StackBase) - a declared
     // top below the real top makes every early fault look like a bad stack
     const auto stack_top = layout.stack_base + layout.stack_size;
-    const auto env =
+    const auto env_build =
         mode == GuestMode::kX86
             ? loader::build_environment_x86(layout.env_base, base, stack_top, layout.stack_base,
                                             layout.heap_base, env_modules)
             : loader::build_environment(layout.env_base, base, stack_top, layout.stack_base,
                                         layout.heap_base, env_modules, orders);
+    if (!env_build) {
+        return std::unexpected(failure(
+            RebuildError::kBadSnapshot,
+            std::format("ldr entry name '{}' exceeds the environment name buffer",
+                        env_build.error().name)));
+    }
+    const auto& env = *env_build;
     if (uc_mem_write(unicorn.get(), layout.env_base, env.env.data(), env.env.size()) != UC_ERR_OK) {
         return std::unexpected(failure(RebuildError::kUnicornFailure));
     }

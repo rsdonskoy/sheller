@@ -247,5 +247,29 @@ class ChainMultiplicityRegression(unittest.TestCase):
         self.assertTrue(any(e.get("note") == "section RVA differs" for e in diff.entries))
 
 
+class FoldModuleNameEncodingRegression(unittest.TestCase):
+    @staticmethod
+    def world_with_name(name_bytes):
+        content = bytearray(0x100)
+        content[0x80:0x80 + len(name_bytes)] = name_bytes
+        region = {"base": 0x1000, "size": len(content), "content": bytes(content)}
+        return wd.World(1, [region], {},
+                        {"peb_address": 0, "teb_address": 0, "image_base": 0}, None)
+
+    def test_legacy_narrow_and_utf16_names_fold_identically(self):
+        # Current containers store Ldr names as UTF-16 (Length = bytes);
+        # containers built before the shared-convention change stored narrow
+        # ASCII (Length = the character count). The content sniff keeps the
+        # legacy worlds readable: both shapes fold to the same lowercase name.
+        narrow = b"ntdll.dll"
+        self.assertEqual(
+            wd.fold_module_name(self.world_with_name(narrow), 0x1080, len(narrow)),
+            "ntdll.dll")
+        wide = "kernelbase.dll".encode("utf-16-le")
+        self.assertEqual(
+            wd.fold_module_name(self.world_with_name(wide), 0x1080, len(wide)),
+            "kernelbase.dll")
+
+
 if __name__ == "__main__":
     unittest.main()

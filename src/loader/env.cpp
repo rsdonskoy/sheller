@@ -4,6 +4,7 @@
 #include <array>
 #include <cstring>
 #include <span>
+#include <string_view>
 
 namespace sheller::loader {
 namespace {
@@ -25,8 +26,29 @@ void store32(std::vector<std::uint8_t>& out, std::size_t offset, std::uint32_t v
 void store64(std::vector<std::uint8_t>& out, std::size_t offset, std::uint64_t value)
 {
     for (std::size_t i = 0; i < 8; ++i) {
-        out[offset + i] = static_cast<std::uint8_t>((value >> (8 * i)) & 0xFF);
+        out[offset + i] = static_cast<std::uint8_t>((value >> (8 * i)));
     }
+}
+
+// Writes the folded module name at the buffer offset as UTF-16LE with a u16
+// NUL terminator. UNICODE_STRING conventions: Length counts bytes (2 per
+// character) and MaximumLength adds the terminator - the shape the real
+// loader and the runtime-inserted Ldr entries carry, and the shape a
+// wchar-wise name comparison matches against. Refuses a name that does not
+// fit the buffer instead of truncating.
+bool store_utf16_name(std::vector<std::uint8_t>& out, const std::size_t offset,
+                      const std::string_view name)
+{
+    if (2 * name.size() + 2 > kLdrNameBufferBytes) {
+        return false;
+    }
+    for (std::size_t i = 0; i < name.size(); ++i) {
+        out[offset + 2 * i] = static_cast<std::uint8_t>(name[i]);
+        out[offset + 2 * i + 1] = 0;
+    }
+    out[offset + 2 * name.size()] = 0;
+    out[offset + 2 * name.size() + 1] = 0;
+    return true;
 }
 
 // The three chains' member sequences: an explicit member list per chain
@@ -66,11 +88,11 @@ std::array<std::vector<std::size_t>, 3> chain_sequences(const std::size_t count,
 
 } // namespace
 
-EnvironmentBuild build_environment(const std::uint64_t env_base, const std::uint64_t image_base,
-                                   const std::uint64_t stack_base, const std::uint64_t stack_limit,
-                                   const std::uint64_t heap_base,
-                                   const std::vector<EnvModule>& modules,
-                                   const ChainOrders& orders)
+std::expected<EnvironmentBuild, EnvNameTooLong>
+build_environment(const std::uint64_t env_base, const std::uint64_t image_base,
+                  const std::uint64_t stack_base, const std::uint64_t stack_limit,
+                  const std::uint64_t heap_base, const std::vector<EnvModule>& modules,
+                  const ChainOrders& orders)
 {
     EnvironmentBuild build;
     build.teb_va = env_base + kEnvTebOffset;
@@ -160,36 +182,38 @@ EnvironmentBuild build_environment(const std::uint64_t env_base, const std::uint
 
     // -- per-module LDR_DATA_TABLE_ENTRY bodies --
     // entry base = block (InLoadOrderLinks); FullDllName at +0x48,
-    // BaseDllName at +0x58 - both UNICODE_STRING {u16 len, u16 max, pad,
-    // u64 buffer}; the name bytes live once at +0x80 and both strings
-    // alias them
+    // BaseDllName at +0x58 - both UNICODE_STRING {u16 len (bytes), u16 max,
+    // pad, u64 buffer} over one shared UTF-16LE buffer at +0x80 (Length = 2
+    // per character, MaximumLength adds the u16 NUL - the dll_loader runtime
+    // insertions' and real captures' convention)
     for (std::size_t i = 0; i < modules.size(); ++i) {
         const auto block = node_base + i * static_cast<std::size_t>(kLdrEntryStride);
         store64(env, block + 0x30, modules[i].base); // DllBase
         store32(env, block + 0x40, modules[i].size); // SizeOfImage
-        const auto name_len = static_cast<std::uint16_t>(modules[i].name.size());
-        const auto full_len = static_cast<std::uint16_t>(name_len + 1);
+        if (!store_utf16_name(env, block + 0x80, modules[i].name)) {
+            return std::unexpected(EnvNameTooLong{modules[i].name});
+        }
         const auto name_va = env_base + block + 0x80;
-        std::memcpy(&env[block + 0x80], modules[i].name.c_str(), modules[i].name.size() + 1);
+        const auto name_bytes = static_cast<std::uint16_t>(2 * modules[i].name.size());
+        const auto full_bytes = static_cast<std::uint16_t>(name_bytes + 2);
         // FullDllName (entry + 0x48)
-        store16(env, block + 0x48, name_len);
-        store16(env, block + 0x4A, full_len);
+        store16(env, block + 0x48, name_bytes);
+        store16(env, block + 0x4A, full_bytes);
         store64(env, block + 0x50, name_va);
         // BaseDllName (entry + 0x58) - aliases the same bytes
-        store16(env, block + 0x58, name_len);
-        store16(env, block + 0x5A, full_len);
+        store16(env, block + 0x58, name_bytes);
+        store16(env, block + 0x5A, full_bytes);
         store64(env, block + 0x60, name_va);
     }
 
     return build;
 }
 
-EnvironmentBuild build_environment_x86(const std::uint64_t env_base, const std::uint64_t image_base,
-                                       const std::uint64_t stack_base,
-                                       const std::uint64_t stack_limit,
-                                       const std::uint64_t heap_base,
-                                       const std::vector<EnvModule>& modules,
-                                       const ChainOrders& orders)
+std::expected<EnvironmentBuild, EnvNameTooLong>
+build_environment_x86(const std::uint64_t env_base, const std::uint64_t image_base,
+                      const std::uint64_t stack_base, const std::uint64_t stack_limit,
+                      const std::uint64_t heap_base, const std::vector<EnvModule>& modules,
+                      const ChainOrders& orders)
 {
     EnvironmentBuild build;
     build.teb_va = env_base + kEnvTebOffset;
@@ -285,23 +309,26 @@ EnvironmentBuild build_environment_x86(const std::uint64_t env_base, const std::
 
     // -- per-module LDR_DATA_TABLE_ENTRY32 bodies --
     // entry base = block (InLoadOrderLinks); DllBase@0x18, SizeOfImage@0x20,
-    // FullDllName@0x24, BaseDllName@0x2C - UNICODE_STRING32 {u16 len, u16
-    // max, u32 buffer}; the name bytes live once at +0x80, both alias them
+    // FullDllName@0x24, BaseDllName@0x2C - UNICODE_STRING32 {u16 len (bytes),
+    // u16 max, u32 buffer} over one shared UTF-16LE buffer at +0x80 (same
+    // byte-count conventions as the x64 entries and the runtime insertions)
     for (std::size_t i = 0; i < modules.size(); ++i) {
         const auto block = node_base + i * static_cast<std::size_t>(kLdrEntryStride);
         store32(env, block + 0x18, static_cast<std::uint32_t>(modules[i].base)); // DllBase
         store32(env, block + 0x20, modules[i].size);                             // SizeOfImage
-        const auto name_len = static_cast<std::uint16_t>(modules[i].name.size());
-        const auto full_len = static_cast<std::uint16_t>(name_len + 1);
+        if (!store_utf16_name(env, block + 0x80, modules[i].name)) {
+            return std::unexpected(EnvNameTooLong{modules[i].name});
+        }
         const auto name_va = static_cast<std::uint32_t>(env_base + block + 0x80);
-        std::memcpy(&env[block + 0x80], modules[i].name.c_str(), modules[i].name.size() + 1);
+        const auto name_bytes = static_cast<std::uint16_t>(2 * modules[i].name.size());
+        const auto full_bytes = static_cast<std::uint16_t>(name_bytes + 2);
         // FullDllName (entry + 0x24)
-        store16(env, block + 0x24, name_len);
-        store16(env, block + 0x26, full_len);
+        store16(env, block + 0x24, name_bytes);
+        store16(env, block + 0x26, full_bytes);
         store32(env, block + 0x28, name_va);
         // BaseDllName (entry + 0x2C) - aliases the same bytes
-        store16(env, block + 0x2C, name_len);
-        store16(env, block + 0x2E, full_len);
+        store16(env, block + 0x2C, name_bytes);
+        store16(env, block + 0x2E, full_bytes);
         store32(env, block + 0x30, name_va);
     }
 

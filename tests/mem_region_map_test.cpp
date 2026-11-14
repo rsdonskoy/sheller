@@ -1,11 +1,16 @@
 // Memory region map tests: PE32+ section-table parsing from synthetic
 // image bytes, and the three-tier interval attribution (image section >
 // headers pseudo-section > snapshot region), with unmapped addresses
-// returning no attribution. Pure standard library - both platforms.
+// returning no attribution. The Ldr-walk case runs a real unicorn instance
+// over a synthetic guest chain; the rest is pure standard library, both
+// platforms.
 
 #include "mem_region_map.h"
 
 #include <gtest/gtest.h>
+
+#include <unicorn/unicorn.h>
+#include <unicorn/x86.h>
 
 #include <array>
 #include <cstdint>
@@ -450,6 +455,60 @@ TEST(RegionClass, PayloadSlots)
     const auto region_slots = mem::xfer_payload_slots(region);
     EXPECT_EQ(region_slots.first, 0xFF12U);  // class sentinel in the module slot
     EXPECT_EQ(region_slots.second, 0xFFFFU); // no section refinement
+}
+
+TEST(MemRegionMap, LdrWalkFoldsBothNameEncodings)
+{
+    // Current containers carry Ldr names as UTF-16 (Length = bytes); worlds
+    // built before the shared-convention change carried narrow ASCII
+    // (Length = the character count). The content sniff must keep reading
+    // both in one walk - the legacy shape never has the zero high byte the
+    // wide shape carries on every other byte.
+    uc_engine* uc = nullptr;
+    ASSERT_EQ(uc_open(UC_ARCH_X86, UC_MODE_64, &uc), UC_ERR_OK);
+    uc_mem_map(uc, 0x500000, 0x3000, UC_PROT_ALL);
+    const auto put64 = [&](std::uint64_t at, std::uint64_t value) {
+        uc_mem_write(uc, 0x500000 + at, &value, sizeof value);
+    };
+    const auto put32 = [&](std::uint64_t at, std::uint32_t value) {
+        uc_mem_write(uc, 0x500000 + at, &value, sizeof value);
+    };
+    const auto put16 = [&](std::uint64_t at, std::uint16_t value) {
+        uc_mem_write(uc, 0x500000 + at, &value, sizeof value);
+    };
+    // TEB@+0x000 (PEB at +0x60), PEB@+0x100 (Ldr at +0x18), Ldr@+0x200
+    // (InLoadOrder head at +0x10); two entries at +0x300 and +0x400.
+    put64(0x060, 0x500100);
+    put64(0x118, 0x500200);
+    put64(0x210, 0x500300); // head.Flink -> entry 0
+    // entry 0: legacy narrow "ntdll.dll" (Length = 9 characters)
+    put64(0x300, 0x500400); // Flink -> entry 1
+    put64(0x308, 0x500210); // Blink -> head
+    put64(0x330, 0x501000); // DllBase
+    put32(0x340, 0x1000);   // SizeOfImage
+    put16(0x358, 9);        // BaseDllName.Length (narrow characters)
+    put64(0x360, 0x500380); // BaseDllName.Buffer
+    const char narrow[] = "ntdll.dll";
+    uc_mem_write(uc, 0x500380, narrow, sizeof narrow);
+    // entry 1: UTF-16 "kernel32.dll" (Length = 24 bytes), closes the chain
+    put64(0x400, 0x500210); // Flink -> head
+    put64(0x408, 0x500300); // Blink -> entry 0
+    put64(0x430, 0x502000); // DllBase
+    put32(0x440, 0x1000);   // SizeOfImage
+    put16(0x458, 24);       // BaseDllName.Length (bytes)
+    put64(0x460, 0x500480); // BaseDllName.Buffer
+    const char16_t wide[] = u"kernel32.dll";
+    uc_mem_write(uc, 0x500480, wide, sizeof wide);
+    std::uint64_t gs_base = 0x500000;
+    uc_reg_write(uc, UC_X86_REG_GS_BASE, &gs_base);
+
+    const auto images = mem::enumerate_guest_images(uc);
+    ASSERT_EQ(images.size(), 2U);
+    EXPECT_STREQ(images[0].module.name.data(), "ntdll.dll");
+    EXPECT_EQ(images[0].module.base, 0x501000ULL);
+    EXPECT_STREQ(images[1].module.name.data(), "kernel32.dll");
+    EXPECT_EQ(images[1].module.base, 0x502000ULL);
+    uc_close(uc);
 }
 
 namespace evolution {

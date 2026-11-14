@@ -67,7 +67,9 @@ constexpr std::uint64_t kCapTeb = 0x7FF9E0000000;
 constexpr std::uint64_t kCapImageBase = 0x140000000;
 constexpr std::uint64_t kCapStack = 0x7FF9F0000000;
 
-// Crafted-world constants: the engine's env-block layout, narrow ASCII names.
+// Crafted-world constants: the env-block layout, narrow ASCII names - the
+// container shape built before the shared UTF-16 name convention, which the
+// diff must keep reading.
 constexpr std::uint64_t kCraNtdll = 0x7FFEE0000000;
 constexpr std::uint64_t kCraK32 = 0x7FFEE0010000;
 constexpr std::uint64_t kCraW32u = 0x7FFEE0020000;
@@ -174,8 +176,9 @@ struct LdrModule {
 // The engine's Ldr area (env.cpp layout): three closed chains with heads at
 // +0x10/0x20/0x30, entries at +0x58+i*0x100, DllBase@+0x30, SizeOfImage@+0x40,
 // BaseDllName UNICODE_STRING@+0x58 aliasing the name bytes at block+0x80.
-// narrow=true spells names as ASCII with byte-count Length (the synthetic
-// environment shape); narrow=false spells UTF-16LE (real capture shape).
+// narrow=true spells names as ASCII with byte-count Length (the legacy
+// container shape); narrow=false spells UTF-16LE (the current engine shape
+// and every real capture).
 std::vector<std::uint8_t> build_ldr_area(std::uint64_t area_va,
                                          const std::vector<LdrModule>& modules, bool narrow)
 {

@@ -478,6 +478,7 @@ add_test(NAME registry_intercept_e2e COMMAND registry_intercept_e2e_test)
 add_executable(mem_region_map_test mem_region_map_test.cpp)
 target_include_directories(mem_region_map_test PRIVATE
   "${CMAKE_CURRENT_SOURCE_DIR}/../src/engine")
+target_include_directories(mem_region_map_test SYSTEM PRIVATE ${SHELLER_UNICORN_INCLUDE_DIR})
 target_link_libraries(mem_region_map_test PRIVATE GTest::gtest_main sheller_engine)
 sheller_apply_common(mem_region_map_test)
 

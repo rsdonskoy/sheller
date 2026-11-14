@@ -82,21 +82,20 @@ std::uint16_t read_guest_u16(uc_engine* const uc, const std::uint64_t address)
     return value;
 }
 
-// Folds the UTF-16 BaseDllName into lowercase ASCII, replacing non-ASCII
-// bytes with '?' and truncating at the record capacity.
-// Folds one Ldr BaseDllName into lowercase ASCII. A real capture stores
-// UTF-16 (Length = 2 * characters); the synthetic loader environment stores
-// the same name as narrow ASCII bytes (its Length is the byte count). The
-// two encodings are told apart by content: UTF-16 ASCII text carries a zero
-// high byte on every other byte, the synthetic text never does. Detecting
-// the encoding keeps both worlds' names readable without touching the
-// shipped environment layout.
+// Folds one Ldr BaseDllName into lowercase ASCII, replacing non-ASCII bytes
+// with '?' and truncating at the record capacity. Current containers store
+// the name as UTF-16 (Length = 2 * characters), matching the real loader and
+// the runtime-inserted Ldr entries; containers built before the
+// shared-convention change stored narrow ASCII bytes (Length = the byte
+// count). The two encodings are told apart by content: UTF-16 ASCII text
+// carries a zero high byte on every other byte, the narrow text never does.
+// Detecting the encoding keeps the legacy containers' names readable.
 //
 // The narrow read is trusted only for a name the buffer holds in full: a
-// real UTF-16 BaseDllName always contains ASCII (at minimum the extension),
-// and ASCII in UTF-16 puts a zero byte inside any complete window - so an
-// all-printable byte string read in full is the synthetic shape, while a
-// truncated all-printable prefix (a >64-byte UTF-16 name, never a synthetic
+// UTF-16 BaseDllName always contains ASCII (at minimum the extension), and
+// ASCII in UTF-16 puts a zero byte inside any complete window - so an
+// all-printable byte string read in full is the legacy narrow shape, while a
+// truncated all-printable prefix (a >64-byte UTF-16 name, never a legacy
 // one - the longest generated name is 18 bytes) defers to the wide read.
 // What remains undecidable by content: a name whose every byte is printable
 // AND which would be valid non-ASCII UTF-16 - that requires not a single

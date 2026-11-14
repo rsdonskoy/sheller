@@ -11,11 +11,19 @@
 #include <algorithm>
 #include <cstdio>
 #include <cstring>
+#include <string>
 #include <vector>
 
 namespace {
 
 using namespace sheller::loader;
+
+std::uint16_t peek16(const std::vector<std::uint8_t>& bytes, std::size_t offset)
+{
+    std::uint16_t value = 0;
+    std::memcpy(&value, bytes.data() + offset, sizeof value);
+    return value;
+}
 
 TEST(LoaderEnv, KuserSystemRootShapeAndDoubleBuildIdentity)
 {
@@ -68,8 +76,9 @@ TEST(LoaderEnv, ChainOrdersThreadEachChainByItsOwnRecord)
     orders.load = {entry, 0, 1, 2};
     orders.memory = {entry, 0, 1, 2};
     orders.init = {0, 2, 1}; // the record: no main image, kernelbase before kernel32
-    const auto build = build_environment(env_base, 0x400000, 0x300000, 0x200000, 0x4000000,
-                                         modules, orders);
+    const auto build =
+        build_environment(env_base, 0x400000, 0x300000, 0x200000, 0x4000000, modules, orders)
+            .value();
     ASSERT_EQ(build.env.size(), static_cast<std::size_t>(kEnvBlockSize));
 
     const std::size_t node_base = static_cast<std::size_t>(kEnvLdrOffset) + 0x58;
@@ -111,8 +120,8 @@ TEST(LoaderEnv, DefaultOrdersKeepArgumentSequenceEverywhere)
     const std::uint64_t env_base = 0x02000000;
     const std::vector<EnvModule> modules{{0x7FF800000000ULL, 0x268000, "ntdll.dll"},
                                          {0x400000, 0x2000, "sample.exe"}};
-    const auto build = build_environment(env_base, 0x400000, 0x300000, 0x200000, 0x4000000,
-                                         modules);
+    const auto build =
+        build_environment(env_base, 0x400000, 0x300000, 0x200000, 0x4000000, modules).value();
     const std::size_t node_base = static_cast<std::size_t>(kEnvLdrOffset) + 0x58;
     const auto peek64 = [&](std::size_t offset) {
         std::uint64_t value = 0;
@@ -123,6 +132,51 @@ TEST(LoaderEnv, DefaultOrdersKeepArgumentSequenceEverywhere)
         const std::size_t head = static_cast<std::size_t>(kEnvLdrOffset) + 0x10 + chain * 0x10;
         EXPECT_EQ(peek64(head), env_base + node_base + chain * 0x10) << "chain " << chain;
     }
+}
+
+TEST(LoaderEnv, LdrEntryNamesAreUtf16WithByteLengths)
+{
+    // the static entries carry the same name conventions as the runtime
+    // insertions and real captures: one UTF-16LE buffer + u16 NUL, UNICODE_STRING
+    // Length counting bytes - a wchar-wise name walk (every read 2 bytes) compares
+    // equal, and a wide read of the buffer yields the folded name
+    const std::uint64_t env_base = 0x02000000;
+    const std::vector<EnvModule> modules{{0x400000, 0x2000, "sample.exe"},
+                                         {0x7FF800000000ULL, 0x268000, "ntdll.dll"}};
+    const auto build =
+        build_environment(env_base, 0x400000, 0x300000, 0x200000, 0x4000000, modules).value();
+    const std::size_t node_base = static_cast<std::size_t>(kEnvLdrOffset) + 0x58;
+    for (std::size_t i = 0; i < modules.size(); ++i) {
+        const auto block = node_base + i * static_cast<std::size_t>(kLdrEntryStride);
+        const auto length = static_cast<std::uint16_t>(2 * modules[i].name.size());
+        // both UNICODE_STRINGs: Length bytes, MaximumLength adds the terminator
+        EXPECT_EQ(peek16(build.env, block + 0x48), length) << "module " << i;
+        EXPECT_EQ(peek16(build.env, block + 0x4A), length + 2) << "module " << i;
+        EXPECT_EQ(peek16(build.env, block + 0x58), length) << "module " << i;
+        EXPECT_EQ(peek16(build.env, block + 0x5A), length + 2) << "module " << i;
+        // the buffer: UTF-16LE text, u16 NUL, nothing spills past the pair
+        const auto buffer_at = block + 0x80;
+        for (std::size_t c = 0; c < modules[i].name.size(); ++c) {
+            EXPECT_EQ(build.env[buffer_at + 2 * c], static_cast<std::uint8_t>(modules[i].name[c]))
+                << "module " << i << " char " << c;
+            EXPECT_EQ(build.env[buffer_at + 2 * c + 1], 0) << "module " << i << " char " << c;
+        }
+        EXPECT_EQ(build.env[buffer_at + length], 0) << "module " << i;
+        EXPECT_EQ(build.env[buffer_at + length + 1], 0) << "module " << i;
+    }
+}
+
+TEST(LoaderEnv, OverlongEntryNameIsANamedRefusal)
+{
+    // 64 characters need 130 bytes and the +0x80 buffer holds 0x80: the build
+    // refuses by name instead of truncating (a truncated name would be a
+    // second, quieter walk-breaking name)
+    const std::uint64_t env_base = 0x02000000;
+    const std::vector<EnvModule> modules{{0x400000, 0x2000, std::string(64, 'a') + ".dll"}};
+    const auto refused =
+        build_environment(env_base, 0x400000, 0x300000, 0x200000, 0x4000000, modules);
+    ASSERT_FALSE(refused.has_value());
+    EXPECT_EQ(refused.error().name, modules[0].name);
 }
 
 // Minimal x64 PE32+ file: headers at 0x0, one section at raw 0x200 mapped at
