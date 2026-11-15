@@ -394,7 +394,8 @@ resolve_imports(std::span<std::uint8_t> image, const std::vector<LoadedModule>& 
                    import_size > image.size() - import_rva)) {
         return std::unexpected(LoadError::kBadImport);
     }
-    const auto import_end = strict ? static_cast<std::size_t>(import_rva) + import_size : image.size();
+    const auto import_end =
+        strict ? static_cast<std::size_t>(import_rva) + import_size : image.size();
 
     auto offset = static_cast<std::size_t>(import_rva);
     bool descriptors_terminated = false;
@@ -419,8 +420,8 @@ resolve_imports(std::span<std::uint8_t> image, const std::vector<LoadedModule>& 
             }
             continue;
         }
-        const auto dll_name = strict ? read_import_string(image, name_rva)
-                                     : read_c_string(image, name_rva);
+        const auto dll_name =
+            strict ? read_import_string(image, name_rva) : read_c_string(image, name_rva);
         if (strict && dll_name.empty()) {
             return std::unexpected(LoadError::kBadImport);
         }
@@ -466,7 +467,7 @@ resolve_imports(std::span<std::uint8_t> image, const std::vector<LoadedModule>& 
                 }
                 const auto name_offset = static_cast<std::size_t>(thunk & 0xFFFFFFFF) + 2;
                 const auto function_name = strict ? read_import_string(image, name_offset)
-                                                   : read_c_string(image, name_offset);
+                                                  : read_c_string(image, name_offset);
                 if (strict && function_name.empty()) {
                     return std::unexpected(LoadError::kBadImport);
                 }
@@ -522,8 +523,8 @@ bind_delayed_imports(std::span<std::uint8_t> image, const std::vector<LoadedModu
         return fixups; // no delay imports: clean no-op
     }
     // a directory that does not name in-image bytes is malformed, not absent
-    if (static_cast<std::uint64_t>(delay_rva) + 32 > image.size() ||
-        delay_size < 32 || delay_size > image.size() - delay_rva) {
+    if (static_cast<std::uint64_t>(delay_rva) + 32 > image.size() || delay_size < 32 ||
+        delay_size > image.size() - delay_rva) {
         return std::unexpected(LoadError::kBadDelayImport);
     }
 
@@ -557,8 +558,8 @@ bind_delayed_imports(std::span<std::uint8_t> image, const std::vector<LoadedModu
         const auto piat_field = read32(image, offset + 12);
         const auto pint_field = read32(image, offset + 16);
         if (gr_attrs == 0 && name_field == 0 && phmod_field == 0 && piat_field == 0 &&
-            pint_field == 0 && read32(image, offset + 20) == 0 &&
-            read32(image, offset + 24) == 0 && read32(image, offset + 28) == 0) {
+            pint_field == 0 && read32(image, offset + 20) == 0 && read32(image, offset + 24) == 0 &&
+            read32(image, offset + 28) == 0) {
             descriptors_terminated = true;
             break; // terminating descriptor
         }
@@ -593,8 +594,8 @@ bind_delayed_imports(std::span<std::uint8_t> image, const std::vector<LoadedModu
                 return std::unexpected(LoadError::kBadDelayImport);
             }
             for (const auto field : {read32(image, offset + 20), read32(image, offset + 24)}) {
-                if (field != 0 && static_cast<std::uint64_t>(field) +
-                                      (t + 1) * layout.thunk_size > image.size()) {
+                if (field != 0 && static_cast<std::uint64_t>(field) + (t + 1) * layout.thunk_size >
+                                      image.size()) {
                     return std::unexpected(LoadError::kBadDelayImport);
                 }
             }

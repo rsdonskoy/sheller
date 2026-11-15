@@ -38,9 +38,8 @@ TEST(LoaderEnv, KuserSystemRootShapeAndDoubleBuildIdentity)
     // the NtSystemRoot field: UTF-16 `c:\windows` at 0x30 (the capture
     // spelling, lowercase, NUL-terminated) - a shell's PEB walk reads it
     static const std::uint8_t kExpected[] = {
-        'c', 0x00, ':', 0x00, '\\', 0x00, 'w', 0x00,
-        'i', 0x00, 'n', 0x00, 'd', 0x00, 'o', 0x00,
-        'w', 0x00, 's', 0x00, 0x00, 0x00}; // "c:\windows" + NUL
+        'c',  0x00, ':',  0x00, '\\', 0x00, 'w',  0x00, 'i',  0x00, 'n',
+        0x00, 'd',  0x00, 'o',  0x00, 'w',  0x00, 's',  0x00, 0x00, 0x00}; // "c:\windows" + NUL
     EXPECT_EQ(0, std::memcmp(first.data() + 0x30, kExpected, sizeof kExpected));
     // nothing spills past the field
     for (std::size_t i = 0x30 + sizeof kExpected; i < 0x40; ++i) {
@@ -101,8 +100,8 @@ TEST(LoaderEnv, ChainOrdersThreadEachChainByItsOwnRecord)
                 break;
             }
             const std::size_t slot = at - node_base;
-            const std::size_t index = (slot - chain * 0x10) /
-                                      static_cast<std::size_t>(kLdrEntryStride);
+            const std::size_t index =
+                (slot - chain * 0x10) / static_cast<std::size_t>(kLdrEntryStride);
             sequence.push_back(index);
             link = peek64(at);
         }

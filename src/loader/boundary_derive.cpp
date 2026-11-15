@@ -231,8 +231,8 @@ bool rva_span_mapped(const ImageInfo& info, const std::uint64_t image_size, cons
         return false;
     }
     const auto header_end = std::min<std::uint64_t>(
-        image_size, std::max<std::uint64_t>(0x400,
-            std::max(info.size_of_headers, info.table_end_rva)));
+        image_size,
+        std::max<std::uint64_t>(0x400, std::max(info.size_of_headers, info.table_end_rva)));
     if (rva < header_end && bytes <= header_end - rva) {
         return true;
     }
@@ -316,10 +316,9 @@ derive_boundary_image(std::span<const std::uint8_t> file, const std::string_view
     // relocation table is the named rejection - no half-fixed image).
     auto image = build_image(file, *info);
     if (!image.has_value()) {
-        return std::unexpected(
-            fail(BoundaryDeriveError::kBadSource,
-                 std::format("{}: image build failed: {}", module_name,
-                             load_error_message(image.error()))));
+        return std::unexpected(fail(BoundaryDeriveError::kBadSource,
+                                    std::format("{}: image build failed: {}", module_name,
+                                                load_error_message(image.error()))));
     }
     const auto delta = base - info->image_base;
     if (delta != 0 && info->reloc_directory_rva != 0 && info->reloc_directory_size != 0) {
@@ -329,17 +328,17 @@ derive_boundary_image(std::span<const std::uint8_t> file, const std::string_view
                                                     "the image",
                                                     module_name)));
         }
-        if (const auto relocated = apply_relocations(*image, *info, delta); !relocated.has_value()) {
-            return std::unexpected(
-                fail(BoundaryDeriveError::kBadSource,
-                     std::format("{}: relocation failed: {}", module_name,
-                                 load_error_message(relocated.error()))));
+        if (const auto relocated = apply_relocations(*image, *info, delta);
+            !relocated.has_value()) {
+            return std::unexpected(fail(BoundaryDeriveError::kBadSource,
+                                        std::format("{}: relocation failed: {}", module_name,
+                                                    load_error_message(relocated.error()))));
         }
     } else if (delta != 0) {
         return std::unexpected(
             fail(BoundaryDeriveError::kBadSource,
-                 std::format("{}: mapped at 0x{:x} but carries no relocation directory", module_name,
-                             base)));
+                 std::format("{}: mapped at 0x{:x} but carries no relocation directory",
+                             module_name, base)));
     }
 
     // The whitelist's marker slot precondition: the engine writes the
@@ -487,10 +486,9 @@ derive_boundary_image(std::span<const std::uint8_t> file, const std::string_view
             // whitelist slot (c): the hook-miss guard body is written at the
             // export's own address below (the engine hook owns the answer)
             if (!rva_span_mapped(*info, image->size(), slot.function_rva, 3)) {
-                return std::unexpected(
-                    fail(BoundaryDeriveError::kManifestMismatch,
-                         std::format("{}!{}: stub body RVA 0x{:x} is not mapped", module_name, name,
-                                     slot.function_rva)));
+                return std::unexpected(fail(BoundaryDeriveError::kManifestMismatch,
+                                            std::format("{}!{}: stub body RVA 0x{:x} is not mapped",
+                                                        module_name, name, slot.function_rva)));
             }
             break;
         case BoundaryKind::kTrap:
@@ -527,16 +525,15 @@ derive_boundary_image(std::span<const std::uint8_t> file, const std::string_view
             // manifest's bytes only land when the mapped slot is free (all
             // zero - no real content to overwrite)
             if (!rva_span_mapped(*info, image->size(), slot.function_rva, rule->data_size)) {
-                return std::unexpected(
-                    fail(BoundaryDeriveError::kManifestMismatch,
-                         std::format("{}!{}: data slot RVA 0x{:x} is not mapped", module_name, name,
-                                     slot.function_rva)));
+                return std::unexpected(fail(BoundaryDeriveError::kManifestMismatch,
+                                            std::format("{}!{}: data slot RVA 0x{:x} is not mapped",
+                                                        module_name, name, slot.function_rva)));
             }
             const auto at = static_cast<std::size_t>(slot.function_rva);
-            const bool slot_free = std::all_of(image->begin() + static_cast<std::ptrdiff_t>(at),
-                                               image->begin() + static_cast<std::ptrdiff_t>(
-                                                                          at + rule->data_size),
-                                               [](const std::uint8_t b) { return b == 0; });
+            const bool slot_free =
+                std::all_of(image->begin() + static_cast<std::ptrdiff_t>(at),
+                            image->begin() + static_cast<std::ptrdiff_t>(at + rule->data_size),
+                            [](const std::uint8_t b) { return b == 0; });
             if (slot_free) {
                 item.data_bytes = rule->data_bytes;
             }

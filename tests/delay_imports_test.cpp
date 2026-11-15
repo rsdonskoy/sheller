@@ -25,12 +25,12 @@ using namespace sheller::loader;
 
 constexpr std::uint64_t kImageBase = 0x400000;
 constexpr std::uint32_t kTextRva = 0x1000;
-constexpr std::uint32_t kDirRva = 0x2000;    // export directory
-constexpr std::uint32_t kDelayRva = 0x2800;  // delay-import descriptors
-constexpr std::uint32_t kNameRva = 0x2900;   // descriptor dll name
-constexpr std::uint32_t kIntRva = 0x2980;    // INT thunks
-constexpr std::uint32_t kIatRva = 0x2A00;    // delay IAT slots
-constexpr std::uint32_t kHintRva = 0x2B00;   // hint/name entry
+constexpr std::uint32_t kDirRva = 0x2000;   // export directory
+constexpr std::uint32_t kDelayRva = 0x2800; // delay-import descriptors
+constexpr std::uint32_t kNameRva = 0x2900;  // descriptor dll name
+constexpr std::uint32_t kIntRva = 0x2980;   // INT thunks
+constexpr std::uint32_t kIatRva = 0x2A00;   // delay IAT slots
+constexpr std::uint32_t kHintRva = 0x2B00;  // hint/name entry
 constexpr std::size_t kFileSize = 0x4000;
 
 void put16(std::vector<std::uint8_t>& f, std::uint32_t at, std::uint16_t v)
@@ -154,7 +154,7 @@ std::vector<std::uint8_t> make_delay_importer()
     put32(f, 0x98 + 112 + 13 * 8 + 4, 0x40);
     // pre-fill the fields the binding must not touch
     put64(f, 0x2C00, 0x1111111111111111ULL); // the phmod slot scratch
-    put64(f, 0x3000, 0x2222222222222222ULL);          // bound-IAT scratch
+    put64(f, 0x3000, 0x2222222222222222ULL); // bound-IAT scratch
     return f;
 }
 
@@ -230,8 +230,8 @@ TEST(DelayImports, RvaDescriptorBindsFinalVasAndNothingElse)
     const auto target = make_target();
     auto modules = resident_pair(importer, target);
     std::vector<UnresolvedImport> unresolved;
-    const auto bound = bind_delayed_imports(modules[0].image, modules, &unresolved,
-                                            ApiSetContext{}, "hosta.dll", true);
+    const auto bound = bind_delayed_imports(modules[0].image, modules, &unresolved, ApiSetContext{},
+                                            "hosta.dll", true);
     ASSERT_TRUE(bound.has_value());
     EXPECT_TRUE(unresolved.empty());
     ASSERT_EQ(bound->size(), 2u); // by-name + by-ordinal
@@ -270,8 +270,8 @@ TEST(DelayImports, ForwarderDescriptorResolvesAlongTheChain)
     const auto target = make_target();
     auto modules = resident_pair(importer, target);
     std::vector<UnresolvedImport> unresolved;
-    const auto bound = bind_delayed_imports(modules[0].image, modules, &unresolved,
-                                            ApiSetContext{}, "hosta.dll", true);
+    const auto bound = bind_delayed_imports(modules[0].image, modules, &unresolved, ApiSetContext{},
+                                            "hosta.dll", true);
     ASSERT_TRUE(bound.has_value());
     EXPECT_TRUE(unresolved.empty());
     ASSERT_EQ(bound->size(), 2u);
@@ -290,8 +290,8 @@ TEST(DelayImports, MissingDelayedDependencyIsToleratedWithFileBytes)
     const auto target = make_target();
     auto modules = resident_pair(importer, target);
     std::vector<UnresolvedImport> unresolved;
-    const auto bound = bind_delayed_imports(modules[0].image, modules, &unresolved,
-                                            ApiSetContext{}, "hosta.dll", true);
+    const auto bound = bind_delayed_imports(modules[0].image, modules, &unresolved, ApiSetContext{},
+                                            "hosta.dll", true);
     ASSERT_TRUE(bound.has_value());
     EXPECT_TRUE(unresolved.empty()) << "tolerated misses are never reported";
     EXPECT_TRUE(bound->empty()); // nothing resolved: nothing written
@@ -308,8 +308,8 @@ TEST(DelayImports, VaFormDescriptorIsTheNamedRejection)
     const auto target = make_target();
     auto modules = resident_pair(importer, target);
     std::vector<UnresolvedImport> unresolved;
-    const auto bound = bind_delayed_imports(modules[0].image, modules, &unresolved,
-                                            ApiSetContext{}, "hosta.dll", true);
+    const auto bound = bind_delayed_imports(modules[0].image, modules, &unresolved, ApiSetContext{},
+                                            "hosta.dll", true);
     ASSERT_FALSE(bound.has_value());
     EXPECT_EQ(bound.error(), LoadError::kBadDelayImport);
 }
@@ -375,8 +375,8 @@ TEST(DelayImports, OutOfRangeDirectoryRvaIsTheNamedRejection)
     const auto target = make_target();
     auto modules = resident_pair(importer, target);
     std::vector<UnresolvedImport> unresolved;
-    const auto bound = bind_delayed_imports(modules[0].image, modules, &unresolved,
-                                            ApiSetContext{}, "hosta.dll", true);
+    const auto bound = bind_delayed_imports(modules[0].image, modules, &unresolved, ApiSetContext{},
+                                            "hosta.dll", true);
     ASSERT_FALSE(bound.has_value());
     EXPECT_EQ(bound.error(), LoadError::kBadDelayImport);
 }
@@ -391,8 +391,8 @@ TEST(DelayImports, OutOfRangeHintThunkIsTheNamedRejection)
     const auto target = make_target();
     auto modules = resident_pair(importer, target);
     std::vector<UnresolvedImport> unresolved;
-    const auto bound = bind_delayed_imports(modules[0].image, modules, &unresolved,
-                                            ApiSetContext{}, "hosta.dll", true);
+    const auto bound = bind_delayed_imports(modules[0].image, modules, &unresolved, ApiSetContext{},
+                                            "hosta.dll", true);
     ASSERT_FALSE(bound.has_value());
     EXPECT_EQ(bound.error(), LoadError::kBadDelayImport);
 }
@@ -421,8 +421,8 @@ TEST(DelayImports, NoDelayDirectoryIsACleanNoop)
     std::memcpy(modules[0].name.data(), "hostb.dll", 9);
     static_cast<void>(index_exports(modules[0]));
     std::vector<UnresolvedImport> unresolved;
-    const auto bound = bind_delayed_imports(modules[0].image, modules, &unresolved,
-                                            ApiSetContext{}, "hostb.dll", true);
+    const auto bound = bind_delayed_imports(modules[0].image, modules, &unresolved, ApiSetContext{},
+                                            "hostb.dll", true);
     ASSERT_TRUE(bound.has_value());
     EXPECT_TRUE(bound->empty());
     EXPECT_TRUE(unresolved.empty());

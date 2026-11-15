@@ -162,8 +162,7 @@ build_environment(const std::uint64_t env_base, const std::uint64_t image_base,
         store64(env, head_off + 8, env_base + node(sequence.back(), c));
         for (std::size_t p = 0; p < sequence.size(); ++p) {
             const auto nva = node(sequence[p], c);
-            const auto next =
-                p + 1 < sequence.size() ? node(sequence[p + 1], c) : head_off;
+            const auto next = p + 1 < sequence.size() ? node(sequence[p + 1], c) : head_off;
             const auto prev = p == 0 ? head_off : node(sequence[p - 1], c);
             store64(env, nva, env_base + next);
             store64(env, nva + 8, env_base + prev);
@@ -283,14 +282,11 @@ build_environment_x86(const std::uint64_t env_base, const std::uint64_t image_ba
             store32(env, head_off + 4, static_cast<std::uint32_t>(env_base + head_off));
             continue;
         }
-        store32(env, head_off,
-                static_cast<std::uint32_t>(env_base + node(sequence.front(), c)));
-        store32(env, head_off + 4,
-                static_cast<std::uint32_t>(env_base + node(sequence.back(), c)));
+        store32(env, head_off, static_cast<std::uint32_t>(env_base + node(sequence.front(), c)));
+        store32(env, head_off + 4, static_cast<std::uint32_t>(env_base + node(sequence.back(), c)));
         for (std::size_t p = 0; p < sequence.size(); ++p) {
             const auto nva = node(sequence[p], c);
-            const auto next =
-                p + 1 < sequence.size() ? node(sequence[p + 1], c) : head_off;
+            const auto next = p + 1 < sequence.size() ? node(sequence[p + 1], c) : head_off;
             const auto prev = p == 0 ? head_off : node(sequence[p - 1], c);
             store32(env, nva, static_cast<std::uint32_t>(env_base + next));
             store32(env, nva + 4, static_cast<std::uint32_t>(env_base + prev));

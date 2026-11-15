@@ -303,11 +303,13 @@ std::expected<LoadedSystemModules, RebuildFailure> load_directory_system_modules
     if (!closure_root.empty()) {
         const auto info = loader::parse_pe(closure_root);
         if (!info) {
-            return std::unexpected(failure(RebuildError::kBadSnapshot, "closure root PE malformed"));
+            return std::unexpected(
+                failure(RebuildError::kBadSnapshot, "closure root PE malformed"));
         }
         auto built = loader::build_image(closure_root, *info);
         if (!built) {
-            return std::unexpected(failure(RebuildError::kBadSnapshot, "closure root image malformed"));
+            return std::unexpected(
+                failure(RebuildError::kBadSnapshot, "closure root image malformed"));
         }
         root_image = std::move(*built);
     }
@@ -416,7 +418,8 @@ std::expected<LoadedSystemModules, RebuildFailure> load_directory_system_modules
         dir_dlls.emplace(name, entry.path());
     }
     std::size_t extra_index = 0;
-    const auto load_from_dir = [&](const std::string& folded) -> std::expected<void, RebuildFailure> {
+    const auto load_from_dir =
+        [&](const std::string& folded) -> std::expected<void, RebuildFailure> {
         const auto path_it = dir_dlls.find(folded);
         if (path_it == dir_dlls.end()) {
             return std::unexpected(
@@ -481,20 +484,23 @@ std::expected<LoadedSystemModules, RebuildFailure> load_directory_system_modules
         // pull members in.
         std::vector<loader::UnresolvedImport> loop_unresolved;
         std::vector<std::string> loop_dependents;
-        const auto sample_checked =
-            loader::resolve_imports(image, loaded.modules, &loop_unresolved, api_set_ctx, {}, false);
+        const auto sample_checked = loader::resolve_imports(image, loaded.modules, &loop_unresolved,
+                                                            api_set_ctx, {}, false);
         if (!sample_checked) {
-            return std::unexpected(failure(RebuildError::kBadSnapshot, "sample import table malformed"));
+            return std::unexpected(
+                failure(RebuildError::kBadSnapshot, "sample import table malformed"));
         }
         loop_dependents.resize(loop_unresolved.size(),
                                std::string{}); // sample-direct: no depending module
         if (!root_image.empty()) {
             std::vector<loader::UnresolvedImport> root_unresolved;
-            const auto checked = loader::resolve_imports(root_image, loaded.modules,
-                &root_unresolved, api_set_ctx, closure_root_name, false);
+            const auto checked =
+                loader::resolve_imports(root_image, loaded.modules, &root_unresolved, api_set_ctx,
+                                        closure_root_name, false);
             if (!checked) {
-                return std::unexpected(failure(RebuildError::kBadSnapshot,
-                    std::format("{}: import table malformed", closure_root_name)));
+                return std::unexpected(
+                    failure(RebuildError::kBadSnapshot,
+                            std::format("{}: import table malformed", closure_root_name)));
             }
             for (const auto& miss : root_unresolved) {
                 loop_unresolved.push_back(miss);
@@ -512,7 +518,8 @@ std::expected<LoadedSystemModules, RebuildFailure> load_directory_system_modules
                 loaded.modules[i].image, loaded.modules, &module_unresolved, api_set_ctx,
                 std::string_view(loaded.modules[i].name.data()), false);
             if (!checked) {
-                return std::unexpected(failure(RebuildError::kBadSnapshot,
+                return std::unexpected(failure(
+                    RebuildError::kBadSnapshot,
                     std::format("{}: import table malformed", loaded.modules[i].name.data())));
             }
             const std::string depending_module(std::string_view(loaded.modules[i].name.data()));
@@ -634,9 +641,8 @@ std::expected<LoadedSystemModules, RebuildFailure> load_directory_system_modules
         // final VAs; resolution misses tolerate (the slot keeps its file
         // bytes - the file's own static failure thunk); a VA-form or
         // out-of-range descriptor is this loop's named rejection
-        auto delayed = loader::bind_delayed_imports(module.image, loaded.modules,
-                                                    &resident_unresolved, api_set_ctx, module_name,
-                                                    true);
+        auto delayed = loader::bind_delayed_imports(
+            module.image, loaded.modules, &resident_unresolved, api_set_ctx, module_name, true);
         if (!delayed.has_value()) {
             return std::unexpected(
                 failure(RebuildError::kBadSnapshot,
@@ -1089,19 +1095,18 @@ std::expected<PreparedGuest, RebuildFailure> prepare_guest_stream(std::istream& 
 // the sample's imports against them and registers the intercepted
 // entries. Returns the module set with its guest-side map bytes and
 // the intercepted (VA, handler id) pairs.
-std::expected<LoadedSystemModules, RebuildFailure>
-load_system_modules(const GuestMode mode, const std::filesystem::path& synthetic_module_dir,
-                    std::vector<std::uint8_t>& image,
-                    const std::filesystem::path& system_modules_dir,
-                    const bool system_modules_fallback,
-                    const std::span<const std::uint8_t> closure_root,
-                    const std::string_view closure_root_name)
+std::expected<LoadedSystemModules, RebuildFailure> load_system_modules(
+    const GuestMode mode, const std::filesystem::path& synthetic_module_dir,
+    std::vector<std::uint8_t>& image, const std::filesystem::path& system_modules_dir,
+    const bool system_modules_fallback, const std::span<const std::uint8_t> closure_root,
+    const std::string_view closure_root_name)
 {
     // Directory mode: the strict source tiers, no host system directories,
     // no silent synthetic mixing.
     if (!system_modules_dir.empty()) {
         return load_directory_system_modules(mode, system_modules_dir, system_modules_fallback,
-                                             synthetic_module_dir, image, closure_root, closure_root_name);
+                                             synthetic_module_dir, image, closure_root,
+                                             closure_root_name);
     }
     LoadedSystemModules loaded;
     // one resident module: map its bytes at the fixed base, relocate by the
@@ -1485,8 +1490,8 @@ build_loader_world(UnicornEngine& unicorn, const GuestMode mode, const LoadedSys
     // the guest-visible Ldr spelling is the entry image's arrival name, not
     // the host attribution placeholder: the synthetic `loader_image` name
     // never enters a Ldr table entry
-    const std::string entry_arrival{
-        arrival_name.empty() ? std::string{module_name} : std::string{arrival_name}};
+    const std::string entry_arrival{arrival_name.empty() ? std::string{module_name}
+                                                         : std::string{arrival_name}};
     for (const auto& system : system_modules) {
         mem_region::ModuleImage system_image;
         system_image.module.base = system.base;
@@ -1525,22 +1530,21 @@ build_loader_world(UnicornEngine& unicorn, const GuestMode mode, const LoadedSys
         // modules carry their own names (the host attribution placeholder
         // never reaches a guest-visible table)
         const bool is_entry = image_rec.module.base == base;
-        env_modules.push_back({image_rec.module.base,
-                               static_cast<std::uint32_t>(image_rec.module.size),
-                               is_entry ? entry_arrival
-                                        : std::string(image_rec.module.name.data())});
+        env_modules.push_back(
+            {image_rec.module.base, static_cast<std::uint32_t>(image_rec.module.size),
+             is_entry ? entry_arrival : std::string(image_rec.module.name.data())});
     }
     // Three chains threaded per the real loader's shape (the capture
     // corpus's three-chain record, pinned in the crafted-world change
     // directory): load and memory both lead with the main image; the init
     // chain excludes it and starts at ntdll with kernelbase before
     // kernel32 - never one chain's order extrapolated onto another.
-    const auto entry_index = static_cast<std::size_t>(
-        std::find_if(images.begin(), images.end(),
-                     [base](const mem_region::ModuleImage& image_rec) {
-                         return image_rec.module.base == base;
-                     }) -
-        images.begin());
+    const auto entry_index =
+        static_cast<std::size_t>(std::find_if(images.begin(), images.end(),
+                                              [base](const mem_region::ModuleImage& image_rec) {
+                                                  return image_rec.module.base == base;
+                                              }) -
+                                 images.begin());
     loader::ChainOrders orders;
     for (std::size_t i = 0; i < env_modules.size(); ++i) {
         if (i != entry_index) {
@@ -1585,10 +1589,10 @@ build_loader_world(UnicornEngine& unicorn, const GuestMode mode, const LoadedSys
             : loader::build_environment(layout.env_base, base, stack_top, layout.stack_base,
                                         layout.heap_base, env_modules, orders);
     if (!env_build) {
-        return std::unexpected(failure(
-            RebuildError::kBadSnapshot,
-            std::format("ldr entry name '{}' exceeds the environment name buffer",
-                        env_build.error().name)));
+        return std::unexpected(
+            failure(RebuildError::kBadSnapshot,
+                    std::format("ldr entry name '{}' exceeds the environment name buffer",
+                                env_build.error().name)));
     }
     const auto& env = *env_build;
     if (uc_mem_write(unicorn.get(), layout.env_base, env.env.data(), env.env.size()) != UC_ERR_OK) {
@@ -1656,8 +1660,8 @@ seed_wow64_transition(UnicornEngine& unicorn, const GuestMode mode,
 std::expected<PreparedGuest, RebuildFailure>
 prepare_pe_file(const std::filesystem::path& path, bool fidelity_seams,
                 const std::filesystem::path& synthetic_module_dir,
-                const std::filesystem::path& system_modules_dir,
-                const bool system_modules_fallback, const std::string_view arrival_name,
+                const std::filesystem::path& system_modules_dir, const bool system_modules_fallback,
+                const std::string_view arrival_name,
                 const std::span<const std::uint8_t> closure_root,
                 const std::string_view closure_root_name)
 {
@@ -1691,8 +1695,9 @@ prepare_pe_file(const std::filesystem::path& path, bool fidelity_seams,
         callbacks = std::vector<std::uint64_t>{};
     }
 
-    auto system_loaded = load_system_modules(mode, synthetic_module_dir, *image, system_modules_dir,
-                                             system_modules_fallback, closure_root, closure_root_name);
+    auto system_loaded =
+        load_system_modules(mode, synthetic_module_dir, *image, system_modules_dir,
+                            system_modules_fallback, closure_root, closure_root_name);
     if (!system_loaded.has_value()) {
         return std::unexpected(system_loaded.error());
     }
@@ -1728,11 +1733,9 @@ prepare_pe_file(const std::filesystem::path& path, bool fidelity_seams,
         !seeded.has_value()) {
         return std::unexpected(seeded.error());
     }
-    auto world = build_loader_world(unicorn, mode, *system_loaded, *image, mapped_base,
-                                    info->image_size, kuser_page.get(),
-                                    arrival_name.empty()
-                                        ? std::string_view{path.filename().string()}
-                                        : arrival_name);
+    auto world = build_loader_world(
+        unicorn, mode, *system_loaded, *image, mapped_base, info->image_size, kuser_page.get(),
+        arrival_name.empty() ? std::string_view{path.filename().string()} : arrival_name);
     if (!world.has_value()) {
         return std::unexpected(world.error());
     }

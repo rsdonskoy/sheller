@@ -70,7 +70,8 @@ plain_loaded_image(const std::vector<std::uint8_t>& source, const std::uint64_t 
     }
     const auto delta = base - info->image_base;
     if (delta != 0) {
-        if (const auto relocated = apply_relocations(*image, *info, delta); !relocated.has_value()) {
+        if (const auto relocated = apply_relocations(*image, *info, delta);
+            !relocated.has_value()) {
             return std::unexpected(relocated.error());
         }
     }
@@ -82,7 +83,8 @@ plain_loaded_image(const std::vector<std::uint8_t>& source, const std::uint64_t 
 TEST(BoundaryDerive, DerivedSyscallNumbersMatchSource)
 {
     const auto source = make_boundary_source(boundary_fixture_exports(false));
-    const auto derived = derive_boundary_image(source, "ntdll.dll", boundary_fixture_rules(), kNtdllBase);
+    const auto derived =
+        derive_boundary_image(source, "ntdll.dll", boundary_fixture_rules(), kNtdllBase);
     ASSERT_TRUE(derived.has_value()) << derived.error().detail;
 
     // the numbers the dispositions carry equal the source bodies' numbers
@@ -107,8 +109,8 @@ TEST(BoundaryDerive, DerivedSyscallNumbersMatchSource)
     for (const auto* entry_name : {"NtCreateFile", "ZwCreateFile"}) {
         const auto* entry = find_export(*derived, entry_name);
         ASSERT_NE(entry, nullptr);
-        EXPECT_EQ(entry->body_rva,
-                  entry_name == std::string("NtCreateFile") ? kBoundaryStubRva : kBoundaryZwStubRva);
+        EXPECT_EQ(entry->body_rva, entry_name == std::string("NtCreateFile") ? kBoundaryStubRva
+                                                                             : kBoundaryZwStubRva);
         const auto body = std::span<const std::uint8_t>(derived->image)
                               .subspan(static_cast<std::size_t>(entry->body_rva), 16);
         EXPECT_EQ(syscall_stub_number_from_bytes(body), 0x55u);
@@ -136,7 +138,8 @@ TEST(BoundaryDerive, NamePrefixDoesNotImplySyscall)
     // classified by the manifest as a trap, the Nt-prefixed export carries
     // no syscall number and its source bytes stay untouched - the stop is
     // the runtime table's, never a rewritten body
-    const auto derived = derive_boundary_image(source, "ntdll.dll", boundary_fixture_rules(), kNtdllBase);
+    const auto derived =
+        derive_boundary_image(source, "ntdll.dll", boundary_fixture_rules(), kNtdllBase);
     ASSERT_TRUE(derived.has_value()) << derived.error().detail;
     const auto* weird = find_export(*derived, "NtWeird");
     ASSERT_NE(weird, nullptr);
@@ -153,8 +156,10 @@ TEST(BoundaryDerive, NamePrefixDoesNotImplySyscall)
 TEST(BoundaryDerive, DeterministicDoubleDerive)
 {
     const auto source = make_boundary_source(boundary_fixture_exports(false));
-    const auto first = derive_boundary_image(source, "ntdll.dll", boundary_fixture_rules(), kNtdllBase);
-    const auto second = derive_boundary_image(source, "ntdll.dll", boundary_fixture_rules(), kNtdllBase);
+    const auto first =
+        derive_boundary_image(source, "ntdll.dll", boundary_fixture_rules(), kNtdllBase);
+    const auto second =
+        derive_boundary_image(source, "ntdll.dll", boundary_fixture_rules(), kNtdllBase);
     ASSERT_TRUE(first.has_value());
     ASSERT_TRUE(second.has_value());
     ASSERT_EQ(first->image.size(), second->image.size());
@@ -172,7 +177,8 @@ TEST(BoundaryDerive, DeterministicDoubleDerive)
 TEST(BoundaryDerive, NamesOrdinalsAliasesAndLayoutSurvive)
 {
     const auto source = make_boundary_source(boundary_fixture_exports(false));
-    const auto derived = derive_boundary_image(source, "ntdll.dll", boundary_fixture_rules(), kNtdllBase);
+    const auto derived =
+        derive_boundary_image(source, "ntdll.dll", boundary_fixture_rules(), kNtdllBase);
     ASSERT_TRUE(derived.has_value()) << derived.error().detail;
 
     // the derived image is the source's own folded shape
@@ -264,7 +270,8 @@ TEST(BoundaryDerive, MappedShapeMatchesSourceOutsideTheWhitelist)
     for (std::size_t i = 0x2100; i < 0x3000; ++i) {
         marked[i] = 0xAA;
     }
-    const auto derived = derive_boundary_image(marked, "ntdll.dll", boundary_fixture_rules(), kNtdllBase);
+    const auto derived =
+        derive_boundary_image(marked, "ntdll.dll", boundary_fixture_rules(), kNtdllBase);
     ASSERT_TRUE(derived.has_value()) << derived.error().detail;
 
     // the mapped shape is the source's own: SizeOfImage, the section list
@@ -341,7 +348,8 @@ TEST(BoundaryDerive, WeldSlotConflictKeepsRealBytes)
         source[content_at + i] = static_cast<std::uint8_t>(0x5A + (i & 0x1F));
     }
 
-    const auto derived = derive_boundary_image(source, "ntdll.dll", boundary_fixture_rules(), kNtdllBase);
+    const auto derived =
+        derive_boundary_image(source, "ntdll.dll", boundary_fixture_rules(), kNtdllBase);
     ASSERT_TRUE(derived.has_value()) << derived.error().detail;
     // no weld layout: the image keeps the source's own SizeOfImage, and the
     // retired slot's real bytes survive
@@ -357,7 +365,8 @@ TEST(BoundaryDerive, Win32uDerivesWithTheSameMechanism)
     // the second boundary-pair member runs the identical real-base
     // mechanism at its own ladder base: same shape contract, same whitelist
     const auto source = make_boundary_source(boundary_fixture_exports(false));
-    const auto derived = derive_boundary_image(source, "win32u.dll", boundary_fixture_rules(), kWin32uBase);
+    const auto derived =
+        derive_boundary_image(source, "win32u.dll", boundary_fixture_rules(), kWin32uBase);
     ASSERT_TRUE(derived.has_value()) << derived.error().detail;
 
     const auto info = parse_pe(derived->image);
@@ -385,8 +394,7 @@ TEST(BoundaryDerive, Win32uDerivesWithTheSameMechanism)
         ASSERT_EQ(derived->image[i], (*plain)[i])
             << "non-whitelist byte differs at 0x" << std::hex << i;
     }
-    const auto slot = std::span<const std::uint8_t>(derived->image)
-                          .subspan(kBoundaryDataRva, 8);
+    const auto slot = std::span<const std::uint8_t>(derived->image).subspan(kBoundaryDataRva, 8);
     EXPECT_EQ(0, std::memcmp(slot.data(), boundary_fixture_rules()[5].data_bytes.data(), 8));
 
     // same input bytes and base twice: byte-identical
@@ -405,7 +413,8 @@ TEST(BoundaryDerive, OccupiedDataSlotResolvesToTheRealAddress)
     for (unsigned i = 0; i < 8; ++i) {
         source[kBoundaryDataRva + i] = static_cast<std::uint8_t>(0x11 * (i + 1));
     }
-    const auto derived = derive_boundary_image(source, "ntdll.dll", boundary_fixture_rules(), kNtdllBase);
+    const auto derived =
+        derive_boundary_image(source, "ntdll.dll", boundary_fixture_rules(), kNtdllBase);
     ASSERT_TRUE(derived.has_value()) << derived.error().detail;
     const auto* data = find_export(*derived, "DataExport");
     ASSERT_NE(data, nullptr);
@@ -433,7 +442,8 @@ TEST(BoundaryDerive, NamedRejections)
     x86_source[0x85] = 0x01;
     x86_source[0x98] = 0x0B; // PE32 optional magic
     x86_source[0x99] = 0x01;
-    const auto x86 = derive_boundary_image(x86_source, "ntdll.dll", boundary_fixture_rules(), kNtdllBase);
+    const auto x86 =
+        derive_boundary_image(x86_source, "ntdll.dll", boundary_fixture_rules(), kNtdllBase);
     ASSERT_FALSE(x86.has_value());
     EXPECT_EQ(x86.error().code, BoundaryDeriveError::kUnsupportedMachine);
 
@@ -468,7 +478,8 @@ TEST(BoundaryDerive, NamedRejections)
     // name, before anything maps
     auto dirty = source;
     dirty[kBoundaryMarkerOffset] = 0x7F;
-    const auto marked = derive_boundary_image(dirty, "ntdll.dll", boundary_fixture_rules(), kNtdllBase);
+    const auto marked =
+        derive_boundary_image(dirty, "ntdll.dll", boundary_fixture_rules(), kNtdllBase);
     ASSERT_FALSE(marked.has_value());
     EXPECT_EQ(marked.error().code, BoundaryDeriveError::kBadSource);
     EXPECT_NE(marked.error().detail.find("marker slot"), std::string::npos);
@@ -482,8 +493,7 @@ TEST(BoundaryDerive, WhitelistSlotAfterSectionEndIsNotMapped)
     const std::uint32_t span = 0x1800;
     std::memcpy(source.data() + 0x188 + 8, &span, 4);
     std::memcpy(source.data() + 0x188 + 16, &span, 4);
-    const std::vector<BoundaryRule> rules{
-        {"Compat", 0, BoundaryKind::kCompat, 5, "", 0, 0, {}}};
+    const std::vector<BoundaryRule> rules{{"Compat", 0, BoundaryKind::kCompat, 5, "", 0, 0, {}}};
     const auto derived = derive_boundary_image(source, "other.dll", rules, kWin32uBase);
     ASSERT_FALSE(derived.has_value());
     EXPECT_EQ(derived.error().code, BoundaryDeriveError::kBadSource);
@@ -493,8 +503,7 @@ TEST(BoundaryDerive, WhitelistCanUseTheFullyCopiedHeaderSpan)
 {
     // SizeOfHeaders is 0x1000. The old 0x400 floor is not its upper bound.
     const auto source = make_boundary_source({{"Compat", nullptr, 0x500, {}, {}}});
-    const std::vector<BoundaryRule> rules{
-        {"Compat", 0, BoundaryKind::kCompat, 5, "", 0, 0, {}}};
+    const std::vector<BoundaryRule> rules{{"Compat", 0, BoundaryKind::kCompat, 5, "", 0, 0, {}}};
     const auto derived = derive_boundary_image(source, "other.dll", rules, kWin32uBase);
     ASSERT_TRUE(derived.has_value()) << derived.error().detail;
     EXPECT_NE(derived->image[0x500], 0);

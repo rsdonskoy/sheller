@@ -55,8 +55,8 @@ struct ImageInfo {
     std::uint32_t tls_directory_size{};
     std::uint32_t reloc_directory_rva{};
     std::uint32_t reloc_directory_size{};
-    std::uint32_t size_of_headers{};  // the PE's own SizeOfHeaders declaration
-    std::uint32_t table_end_rva{};    // first offset past the section table
+    std::uint32_t size_of_headers{}; // the PE's own SizeOfHeaders declaration
+    std::uint32_t table_end_rva{};   // first offset past the section table
     std::vector<SectionInfo> sections;
 };
 

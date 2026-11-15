@@ -81,12 +81,12 @@ struct DerivedBoundaryExport {
     std::string name;        // source spelling; empty for an unnamed export
     std::uint32_t ordinal{}; // source ordinal (EAT index + export base)
     BoundaryKind kind{};
-    bool forwarded{};             // forwarder relation preserved from the source
-    std::string forwarder_target; // the preserved "dll.func" spelling
-    std::uint64_t body_rva{};     // the source EAT value: the export's own
-                                  // address (a forwarder keeps the string's
-                                  // RVA inside the export directory); 0 for
-                                  // EAT holes
+    bool forwarded{};               // forwarder relation preserved from the source
+    std::string forwarder_target;   // the preserved "dll.func" spelling
+    std::uint64_t body_rva{};       // the source EAT value: the export's own
+                                    // address (a forwarder keeps the string's
+                                    // RVA inside the export directory); 0 for
+                                    // EAT holes
     std::uint32_t syscall_number{}; // kSyscallStub only: number validated in the source body
 };
 

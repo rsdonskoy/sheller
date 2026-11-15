@@ -320,9 +320,9 @@ std::optional<std::string> synthesize_pending_load(SyscallRunState& state)
     // admission pass: resolvable slots take the final VAs, misses tolerate
     // (the slot keeps its file bytes - the file's own static failure
     // thunk); a VA form or out-of-range descriptor fails the load
-    const auto delayed = loader::bind_delayed_imports(*image, resolve_against, &unresolved,
-                                                      state.api_set_ctx,
-                                                      std::string_view(pending->name), true);
+    const auto delayed =
+        loader::bind_delayed_imports(*image, resolve_against, &unresolved, state.api_set_ctx,
+                                     std::string_view(pending->name), true);
     if (!delayed.has_value()) {
         return std::string{"pending module delayed import binding failed"};
     }

@@ -184,7 +184,8 @@ TEST(ApiSetMap, ContextResolvesMapsAndKeepsSyntheticRoute)
     ASSERT_TRUE(loaded.has_value()) << loaded.error().detail;
 
     const auto source = make_boundary_source(boundary_fixture_exports(false));
-    const auto derived = derive_boundary_image(source, "ntdll.dll", boundary_fixture_rules(), 0x7FF800000000ULL);
+    const auto derived =
+        derive_boundary_image(source, "ntdll.dll", boundary_fixture_rules(), 0x7FF800000000ULL);
     ASSERT_TRUE(derived.has_value()) << derived.error().detail;
     WorldModules world(derived->image);
     const auto& modules = world.modules;

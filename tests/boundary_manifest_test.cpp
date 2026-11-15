@@ -75,7 +75,8 @@ TEST(BoundaryManifest, SeedRowsDriveTheDerive)
     // the seed-derived rules derive the fixture end-to-end, data layout
     // included
     const auto source = make_boundary_source(boundary_fixture_exports(false));
-    const auto derived = sheller::loader::derive_boundary_image(source, "ntdll.dll", *rules, 0x7FF800000000ULL);
+    const auto derived =
+        sheller::loader::derive_boundary_image(source, "ntdll.dll", *rules, 0x7FF800000000ULL);
     ASSERT_TRUE(derived.has_value()) << derived.error().detail;
     const auto data = std::find_if(derived->exports.begin(), derived->exports.end(),
                                    [](const auto& e) { return e.name == "DataExport"; });
@@ -89,8 +90,8 @@ TEST(BoundaryManifest, SeedRowsDriveTheDerive)
     // an export the seed does not cover rejects by name - the committed
     // manifest is the whole coverage, never a prefix of it
     const auto unknown_source = make_boundary_source(boundary_fixture_exports(true));
-    const auto unknown =
-        sheller::loader::derive_boundary_image(unknown_source, "ntdll.dll", *rules, 0x7FF800000000ULL);
+    const auto unknown = sheller::loader::derive_boundary_image(unknown_source, "ntdll.dll", *rules,
+                                                                0x7FF800000000ULL);
     ASSERT_FALSE(unknown.has_value());
     EXPECT_EQ(unknown.error().code, sheller::loader::BoundaryDeriveError::kUnknownExport);
     EXPECT_NE(unknown.error().detail.find("NtUnknown"), std::string::npos);
@@ -103,7 +104,8 @@ TEST(BoundaryManifest, ForwardedExportsClassifyAlongTheChain)
     ASSERT_TRUE(rules.has_value());
 
     const auto source_a = make_boundary_source(boundary_fixture_exports(false));
-    const auto derived_a = sheller::loader::derive_boundary_image(source_a, "ntdll.dll", *rules, 0x7FF800000000ULL);
+    const auto derived_a =
+        sheller::loader::derive_boundary_image(source_a, "ntdll.dll", *rules, 0x7FF800000000ULL);
     ASSERT_TRUE(derived_a.has_value()) << derived_a.error().detail;
 
     std::vector<BoundaryExport> exports_b{
@@ -115,7 +117,8 @@ TEST(BoundaryManifest, ForwardedExportsClassifyAlongTheChain)
     const std::vector<sheller::loader::BoundaryRule> rules_b{
         {"DirectCall", 0, sheller::loader::BoundaryKind::kSyscallStub, 0, "", 0, 0, {}},
     };
-    const auto derived_b = sheller::loader::derive_boundary_image(source_b, "other.dll", rules_b, 0x7FFB00000000ULL);
+    const auto derived_b =
+        sheller::loader::derive_boundary_image(source_b, "other.dll", rules_b, 0x7FFB00000000ULL);
     ASSERT_TRUE(derived_b.has_value()) << derived_b.error().detail;
 
     std::vector<sheller::loader::LoadedModule> modules(2);

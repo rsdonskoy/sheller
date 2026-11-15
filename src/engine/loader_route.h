@@ -85,10 +85,9 @@ std::expected<PreparedGuest, RebuildFailure>
 prepare_pe_file(const std::filesystem::path& path, bool fidelity_seams = true,
                 const std::filesystem::path& synthetic_module_dir = {},
                 const std::filesystem::path& system_modules_dir = {},
-                bool system_modules_fallback = false,
-                  std::string_view arrival_name = {},
-                  std::span<const std::uint8_t> closure_root = {},
-                  std::string_view closure_root_name = {});
+                bool system_modules_fallback = false, std::string_view arrival_name = {},
+                std::span<const std::uint8_t> closure_root = {},
+                std::string_view closure_root_name = {});
 
 std::expected<PreparedGuest, RebuildFailure> prepare_guest(const std::filesystem::path& path);
 
