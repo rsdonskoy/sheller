@@ -168,15 +168,35 @@ TEST(LoaderEnv, LdrEntryNamesAreUtf16WithByteLengths)
 
 TEST(LoaderEnv, OverlongEntryNameIsANamedRefusal)
 {
-    // 64 characters need 130 bytes and the +0x80 buffer holds 0x80: the build
-    // refuses by name instead of truncating (a truncated name would be a
-    // second, quieter walk-breaking name)
+    // exactly 64 characters need 130 bytes and the +0x80 buffer holds 0x80:
+    // the build refuses by name instead of truncating (a truncated name
+    // would be a second, quieter walk-breaking name)
     const std::uint64_t env_base = 0x02000000;
-    const std::vector<EnvModule> modules{{0x400000, 0x2000, std::string(64, 'a') + ".dll"}};
+    const std::vector<EnvModule> modules{{0x400000, 0x2000, std::string(60, 'a') + ".dll"}};
     const auto refused =
         build_environment(env_base, 0x400000, 0x300000, 0x200000, 0x4000000, modules);
     ASSERT_FALSE(refused.has_value());
     EXPECT_EQ(refused.error().name, modules[0].name);
+}
+
+TEST(LoaderEnv, ExactlyFullEntryNameStillBuilds)
+{
+    // 63 characters need 2*63+2 = 0x80 bytes: exactly the +0x80 buffer, so
+    // the refusal guard stays exclusive - one more char (the 64-char refusal
+    // above) is what flips it
+    const std::uint64_t env_base = 0x02000000;
+    const std::vector<EnvModule> modules{{0x400000, 0x2000, std::string(63, 'a')}};
+    const auto build =
+        build_environment(env_base, 0x400000, 0x300000, 0x200000, 0x4000000, modules).value();
+    const auto block = static_cast<std::size_t>(kEnvLdrOffset) + 0x58;
+    EXPECT_EQ(peek16(build.env, block + 0x48), 126); // FullDllName.Length
+    EXPECT_EQ(peek16(build.env, block + 0x4A), 128); // MaximumLength fills the buffer
+    EXPECT_EQ(peek16(build.env, block + 0x58), 126); // BaseDllName.Length
+    EXPECT_EQ(peek16(build.env, block + 0x5A), 128);
+    // the shared buffer is exactly full: the u16 NUL lands on its last two bytes
+    const auto buffer_at = block + 0x80;
+    EXPECT_EQ(build.env[buffer_at + 0xFE], 0);
+    EXPECT_EQ(build.env[buffer_at + 0xFF], 0);
 }
 
 // Minimal x64 PE32+ file: headers at 0x0, one section at raw 0x200 mapped at

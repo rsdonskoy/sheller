@@ -131,14 +131,33 @@ TEST(LoaderEnvX86, LdrEntryNamesAreUtf16WithByteLengths)
 
 TEST(LoaderEnvX86, OverlongEntryNameIsANamedRefusal)
 {
-    // 64 characters need 130 bytes and the +0x80 buffer holds 0x80: named
-    // refusal, never a truncation
+    // exactly 64 characters need 130 bytes and the +0x80 buffer holds 0x80:
+    // named refusal, never a truncation
     const std::uint64_t env_base = 0x02000000;
-    const std::vector<EnvModule> modules{{0x400000, 0x2000, std::string(64, 'a') + ".dll"}};
+    const std::vector<EnvModule> modules{{0x400000, 0x2000, std::string(60, 'a') + ".dll"}};
     const auto refused =
         build_environment_x86(env_base, 0x400000, 0x300000, 0x200000, 0x4000000, modules);
     ASSERT_FALSE(refused.has_value());
     EXPECT_EQ(refused.error().name, modules[0].name);
+}
+
+TEST(LoaderEnvX86, ExactlyFullEntryNameStillBuilds)
+{
+    // 63 characters need 2*63+2 = 0x80 bytes: exactly the +0x80 buffer, so
+    // the refusal guard stays exclusive - one more char (the 64-char refusal
+    // above) is what flips it
+    const std::uint64_t env_base = 0x02000000;
+    const std::vector<EnvModule> modules{{0x400000, 0x2000, std::string(63, 'a')}};
+    const auto build =
+        build_environment_x86(env_base, 0x400000, 0x300000, 0x200000, 0x4000000, modules).value();
+    const auto block = static_cast<std::size_t>(kEnvLdrOffset) + 0x30;
+    EXPECT_EQ(peek16(build.env, block + 0x24), 126); // FullDllName.Length
+    EXPECT_EQ(peek16(build.env, block + 0x26), 128);
+    EXPECT_EQ(peek16(build.env, block + 0x2C), 126); // BaseDllName.Length
+    EXPECT_EQ(peek16(build.env, block + 0x2E), 128);
+    // the shared buffer is exactly full: the u16 NUL lands on its last two bytes
+    EXPECT_EQ(build.env[block + 0x80 + 0xFE], 0);
+    EXPECT_EQ(build.env[block + 0x80 + 0xFF], 0);
 }
 
 } // namespace

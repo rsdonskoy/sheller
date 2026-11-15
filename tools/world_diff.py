@@ -18,9 +18,11 @@ src/loader/env.cpp, src/engine/rebuild_state.h):
   - x64 Ldr walk: PEB@TEB+0x60, Ldr@PEB+0x18, chain heads at
     ldr+0x10/0x20/0x30; entry DllBase@+0x30, SizeOfImage@+0x40,
     BaseDllName UNICODE_STRING@+0x58 (Length u16, Buffer u64).
-  - BaseDllName encoding: UTF-16 in real captures, narrow ASCII in the
-    synthetic loader environment; told apart by content and folded to
-    lowercase ASCII, exactly like the engine's fold_module_name.
+  - BaseDllName encoding: UTF-16 in real captures and in the current
+    synthetic loader environment (Length = 2 * characters); containers
+    built before that shared convention stored narrow ASCII (Length =
+    the byte count). The two encodings are told apart by content and
+    folded to lowercase ASCII, exactly like the engine's fold_module_name.
   - PEB/TEB/image base come from the snapshot metadata block.
 
 Pure file processing: the engine, the CLI and the snapshot format are

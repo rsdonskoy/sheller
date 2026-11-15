@@ -474,7 +474,8 @@ sheller_apply_common(registry_intercept_e2e_test)
 add_test(NAME registry_intercept_e2e COMMAND registry_intercept_e2e_test)
 
 # Memory region map: PE32+ section-table parse + three-tier
-# attribution queries, portable by design.
+# attribution queries, portable by design. New test cases that touch the
+# Ldr-walk fold need the unicorn include above (the one real-instance case).
 add_executable(mem_region_map_test mem_region_map_test.cpp)
 target_include_directories(mem_region_map_test PRIVATE
   "${CMAKE_CURRENT_SOURCE_DIR}/../src/engine")

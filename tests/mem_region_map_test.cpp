@@ -3,7 +3,8 @@
 // headers pseudo-section > snapshot region), with unmapped addresses
 // returning no attribution. The Ldr-walk case runs a real unicorn instance
 // over a synthetic guest chain; the rest is pure standard library, both
-// platforms.
+// platforms. The walk case is x64-shaped and covers the x86 fold too - the
+// fold itself is arch-independent, only the pointer widths differ.
 
 #include "mem_region_map.h"
 
