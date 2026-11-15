@@ -1,5 +1,6 @@
 #include "run_apply.h"
 
+#include "boundary_dispatch.h"
 #include "diag_trace.h"
 #include "dll_loader.h"
 #include "engine_hooks.h"
@@ -100,19 +101,30 @@ apply_run_plan(PreparedGuest& guest, const SyscallRunOptions& options, const Fac
     for (const auto& entry : plan.stub_entries) {
         state.stub_entries.push_back({entry.module, entry.name, 0});
     }
+    // The trap spans this run registers, empty outside directory mode: the
+    // registration-surface trace below reads them.
+    std::vector<TrapSpan> trap_spans{};
     if (plan.directory_mode) {
         state.boundary_trap_vas = plan.boundary_trap_vas;
         state.boundary_trap_names = guest.boundary_trap_names;
         state.directory_mode = true;
         state.api_set_ctx.mode = loader::ApiSetContext::Mode::kDirectoryMap;
         state.api_set_ctx.directory_map = &guest.api_set_map;
-        // One range-bound code hook per surviving trap VA (the plan already
-        // dropped the VAs an intercept supersedes).
-        for (const auto va : plan.boundary_trap_vas) {
+        // One span code hook per trap-owning module instead of one hook per
+        // export (the plan already dropped the VAs an intercept supersedes).
+        // unicorn walks the whole code-hook table for every covered
+        // instruction, and the instruction budget covers every executed
+        // instruction, so per-export hooks taxed the sample's own execution
+        // too. The dispatch index is built once here and searched by the span
+        // callback; the same index selects the modules, so the sample image
+        // and every trap-free module are structurally span-free.
+        state.trap_span_table = build_trap_span_table(plan.boundary_trap_vas);
+        trap_spans = select_trap_spans(state.trap_span_table, state.loader_modules);
+        for (const auto& span : trap_spans) {
             uc_hook trap_hook = 0;
-            const uc_err trap_error =
-                uc_hook_add(guest.unicorn.get(), &trap_hook, UC_HOOK_CODE,
-                            reinterpret_cast<void*>(on_boundary_trap), &state, va, va);
+            const uc_err trap_error = uc_hook_add(guest.unicorn.get(), &trap_hook, UC_HOOK_CODE,
+                                                  reinterpret_cast<void*>(on_boundary_trap_span),
+                                                  &state, span.base, span.base + span.size);
             if (trap_error != UC_ERR_OK) {
                 return std::unexpected(SyscallRunFailure{SyscallRunError::kUnicornFailure,
                                                          static_cast<std::uint32_t>(trap_error),
@@ -121,7 +133,9 @@ apply_run_plan(PreparedGuest& guest, const SyscallRunOptions& options, const Fac
             }
         }
     }
+    std::size_t stub_modules = 0;
     if (plan.needs_stub_hooks) {
+        stub_modules = state.loader_modules.size();
         for (const auto& mod : state.loader_modules) {
             uc_hook stub_hook = 0;
             const uc_err stub_error = uc_hook_add(guest.unicorn.get(), &stub_hook, UC_HOOK_CODE,
@@ -133,6 +147,21 @@ apply_run_plan(PreparedGuest& guest, const SyscallRunOptions& options, const Fac
                                                          {},
                                                          {}});
             }
+        }
+    }
+    // SHELLER_HOOK_TRACE: the code-hook registration surface, once per run.
+    // This is the apply half (traps and stubs); register_run_hooks prints the
+    // other half, and the two sum to the chain unicorn scans per covered
+    // instruction plus the budget's own count hook. Default off: nothing is
+    // rendered and the event stream stays byte-identical.
+    if (diag::wanted(sheller::log::level::kDebug, diag::hook_on())) {
+        diag::emit(sheller::log::level::kDebug, true,
+                   "[hookinv] traps={} unique={} spans={} stubmods={}",
+                   state.boundary_trap_vas.size(), state.trap_span_table.size(), trap_spans.size(),
+                   stub_modules);
+        for (const auto& span : trap_spans) {
+            diag::emit(sheller::log::level::kDebug, true, "[hookinv] span base=0x{:x} size=0x{:x}",
+                       span.base, span.size);
         }
     }
     // Engine dispatch: the trampoline page (int3 marker the callback return

@@ -65,6 +65,16 @@ inline bool file_on()
     return on;
 }
 
+// Code-hook registration surface ([hookinv]): the trap/stub half at apply time
+// and the intercept/window half at hook registration, once per run. The two
+// lines sum to the chain unicorn scans for every covered instruction, which is
+// what makes a registration-form change measurable without a probe build.
+inline bool hook_on()
+{
+    static const bool on = std::getenv("SHELLER_HOOK_TRACE") != nullptr;
+    return on;
+}
+
 #if defined(_MSC_VER)
 #pragma warning(pop)
 #endif

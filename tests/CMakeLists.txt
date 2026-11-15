@@ -546,6 +546,20 @@ sheller_apply_common(run_plan_test)
 
 add_test(NAME run_plan COMMAND run_plan_test)
 
+# Boundary-trap dispatch: the sorted stable-deduplicated VA index and the
+# trap-owning module selection, over hand-built tables - portable by design,
+# no unicorn and no guest memory. The trap stop itself is pinned end to end in
+# loader_directory_test.
+add_executable(boundary_dispatch_test boundary_dispatch_test.cpp)
+target_include_directories(boundary_dispatch_test PRIVATE
+  "${CMAKE_CURRENT_SOURCE_DIR}/../src/engine")
+target_include_directories(boundary_dispatch_test SYSTEM PRIVATE
+  ${SHELLER_UNICORN_INCLUDE_DIR})
+target_link_libraries(boundary_dispatch_test PRIVATE GTest::gtest_main sheller_engine)
+sheller_apply_common(boundary_dispatch_test)
+
+add_test(NAME boundary_dispatch COMMAND boundary_dispatch_test)
+
 # Synthetic DLL load transactions: no host process or system DLL fixtures.
 add_executable(dll_loader_test dll_loader_test.cpp)
 target_include_directories(dll_loader_test PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/../src/engine")

@@ -131,6 +131,21 @@ void on_boundary_trap(uc_engine* uc, const std::uint64_t address, const std::uin
     uc_emu_stop(uc);
 }
 
+// The span form: one code hook over a trap-owning module's whole image, so
+// every instruction of that module arrives here. The dispatch index answers
+// whether this address is a trap entry; a miss returns without touching the
+// state, and a hit takes the exact-entry path above unchanged (same VA, same
+// pre-instruction trigger point, same named diagnosis).
+void on_boundary_trap_span(uc_engine* const uc, const std::uint64_t address, const std::uint32_t,
+                           void* const user_data)
+{
+    const auto* state = static_cast<const SyscallRunState*>(user_data);
+    if (find_trap_span_entry(state->trap_span_table, address) == nullptr) {
+        return;
+    }
+    on_boundary_trap(uc, address, 0, user_data);
+}
+
 void publish_kusd_ticks(SyscallRunState& state, const bool force)
 {
     // The quantized pure function of the block count, stored straight into

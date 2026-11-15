@@ -11,6 +11,7 @@
 #include "../loader/imports.h"
 #include "../syscalls/syscall_policy.h"
 #include "behavior_fact.h"
+#include "boundary_dispatch.h"
 #include "boundary_metadata.h"
 #include "exception_layout.h"
 #include "mem_region_map.h"
@@ -716,13 +717,19 @@ struct SyscallRunState {
     bool fidelity_dispatch{};
     seh::SehDispatchState seh;
     // Directory-mode boundary runtime: the
-    // trap stop points (exact-entry hooks), the fired stop's diagnosis, and
+    // trap stop points as constructed, the fired stop's diagnosis, and
     // the explicit API Set resolution context (directory map; empty in the
     // synthetic routes — the runtime DLL binding and the dynamic queries
     // resolve through it instead of the prefix rules).
     std::vector<std::uint64_t> boundary_trap_vas{};
     std::map<std::uint64_t, std::tuple<std::string, std::string, std::uint32_t>>
         boundary_trap_names{};
+    // The trap dispatch index: the surviving VAs sorted and stable-deduplicated
+    // once at apply time, aliases keeping their first row. The same table drives
+    // the trap-owning module selection and the span callback's lookup; the two
+    // tables above stay exactly as constructed, so the named diagnosis keeps
+    // its first-wins spelling.
+    std::vector<TrapSpanEntry> trap_span_table{};
     loader::ApiSetContext api_set_ctx{};
     bool directory_mode{false};
     struct BoundaryTrapDiagnosis {

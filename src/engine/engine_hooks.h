@@ -15,17 +15,24 @@ bool on_mem_write_prot_callback(uc_engine* const uc, const uc_mem_type, const st
                                 const std::uint32_t size, const std::int64_t,
                                 void* const user_data);
 
-// Block hook of the syscall run: bumps the block counter and, when an event
-// sink is attached, emits block-exec with the block start address (the hook
-// address is the block start). Hot path: no allocation, no IO.
-// Directory-mode boundary trap: an
-// exact-entry code hook over each (c)-class trap VA. Fills the named
-// diagnosis, marks the deliberate stop and halts - the ud2 body and every
-// instruction after the call never execute, and the caller is answered by
-// nothing.
+// Directory-mode boundary trap: the stop itself, reached from a span hook over
+// a trap-owning module. Fills the named diagnosis, marks the deliberate stop
+// and halts - the ud2 body and every instruction after the call never execute,
+// and the caller is answered by nothing.
 void on_boundary_trap(uc_engine* uc, const std::uint64_t address, const std::uint32_t,
                       void* user_data);
 
+// The registration form of that trap: one code hook per trap-owning module's
+// image extent, so every instruction of that module enters here. A binary
+// search over the dispatch index decides whether this address is a trap entry;
+// only a hit takes on_boundary_trap above, and a miss returns with nothing
+// touched. The trigger point is unchanged - a code hook runs before the
+// instruction at the same VA.
+void on_boundary_trap_span(uc_engine* uc, std::uint64_t address, std::uint32_t, void* user_data);
+
+// Block hook of the syscall run: bumps the block counter and, when an event
+// sink is attached, emits block-exec with the block start address (the hook
+// address is the block start). Hot path: no allocation, no IO.
 void on_syscall_run_block(uc_engine* uc, const std::uint64_t address, const std::uint32_t,
                           void* const user_data);
 

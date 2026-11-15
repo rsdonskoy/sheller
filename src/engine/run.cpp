@@ -325,6 +325,11 @@ std::expected<void, SyscallRunFailure> register_run_hooks(PreparedGuest& guest,
 {
     // Diagnostic per-instruction code window: same gating shape as the
     // per-write window - a range-scoped hook costs nothing outside it.
+    // The three flags below are the SHELLER_HOOK_TRACE inventory of the code
+    // hooks this function registers; they are read once at the end.
+    bool diag_code_registered = false;
+    bool behavior_code_registered = false;
+    bool unwind_registered = false;
     uc_hook diag_code_hook = 0;
     if (options.diag_code_hit && options.diag_code_window_lo != 0 &&
         options.diag_code_window_hi > options.diag_code_window_lo) {
@@ -333,6 +338,7 @@ std::expected<void, SyscallRunFailure> register_run_hooks(PreparedGuest& guest,
                         options.diag_code_window_lo, options.diag_code_window_hi) != UC_ERR_OK) {
             return std::unexpected(SyscallRunFailure{SyscallRunError::kUnicornFailure, {}, {}, {}});
         }
+        diag_code_registered = true;
     }
 
     // Diagnostic per-write window: registered
@@ -409,6 +415,7 @@ std::expected<void, SyscallRunFailure> register_run_hooks(PreparedGuest& guest,
                 return std::unexpected(
                     SyscallRunFailure{SyscallRunError::kUnicornFailure, {}, {}, {}});
             }
+            behavior_code_registered = true;
         }
     }
 
@@ -468,8 +475,18 @@ std::expected<void, SyscallRunFailure> register_run_hooks(PreparedGuest& guest,
                     return std::unexpected(
                         SyscallRunFailure{SyscallRunError::kUnicornFailure, {}, {}, {}});
                 }
+                unwind_registered = true;
             }
         }
+    }
+    // SHELLER_HOOK_TRACE: the code-hook half registered here. The apply stage
+    // printed the trap/stub half; together with the budget's own count hook
+    // the two lines are the chain unicorn scans per covered instruction.
+    if (diag::wanted(sheller::log::level::kDebug, diag::hook_on())) {
+        diag::emit(sheller::log::level::kDebug, true,
+                   "[hookinv] code: diag={} behavior={} intercepts={} unwind={}",
+                   diag_code_registered ? 1 : 0, behavior_code_registered ? 1 : 0,
+                   state.intercept_vas.size(), unwind_registered ? 1 : 0);
     }
     return {};
 }
