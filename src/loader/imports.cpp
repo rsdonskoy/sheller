@@ -102,6 +102,18 @@ std::string read_c_string(std::span<const std::uint8_t> bytes, std::size_t offse
     return out;
 }
 
+std::string read_import_string(std::span<const std::uint8_t> bytes, const std::size_t offset)
+{
+    if (offset >= bytes.size()) {
+        return {};
+    }
+    const auto end = std::min(bytes.size(), offset + kMaxExportName + 1);
+    if (std::find(bytes.begin() + offset, bytes.begin() + end, 0) == bytes.begin() + end) {
+        return {};
+    }
+    return read_c_string(bytes, offset);
+}
+
 std::string fold(std::string_view name)
 {
     std::string out;
@@ -368,37 +380,67 @@ resolve_imports(std::span<std::uint8_t> image, const std::vector<LoadedModule>& 
 std::expected<std::vector<ImportFixup>, LoadError>
 resolve_imports(std::span<std::uint8_t> image, const std::vector<LoadedModule>& modules,
                 std::vector<UnresolvedImport>* unresolved, const ApiSetContext& ctx,
-                const std::string_view importer_name)
+                const std::string_view importer_name, const bool write)
 {
     std::vector<ImportFixup> fixups;
+    const bool strict = ctx.mode == ApiSetContext::Mode::kDirectoryMap;
     const auto layout = detect_layout(image);
     const auto import_rva = read32(image, layout.import_dir_offset); // DataDirectory[1].VA
-    if (import_rva == 0 || import_rva >= image.size()) {
+    if (import_rva == 0) {
         return fixups; // no imports: clean no-op
     }
+    const auto import_size = read32(image, layout.import_dir_offset + 4);
+    if (strict && (import_size < 20 || import_rva >= image.size() ||
+                   import_size > image.size() - import_rva)) {
+        return std::unexpected(LoadError::kBadImport);
+    }
+    const auto import_end =
+        strict ? static_cast<std::size_t>(import_rva) + import_size : image.size();
 
     auto offset = static_cast<std::size_t>(import_rva);
+    bool descriptors_terminated = false;
     for (std::size_t d = 0; d < kMaxDescriptors; ++d, offset += 20) {
+        if (offset + 20 > import_end) {
+            if (strict) {
+                return std::unexpected(LoadError::kBadImport);
+            }
+            break;
+        }
         const auto original_thunk = read32(image, offset);
         const auto name_rva = read32(image, offset + 12);
         const auto first_thunk = read32(image, offset + 16);
-        if (original_thunk == 0 && name_rva == 0 && first_thunk == 0) {
+        if (original_thunk == 0 && name_rva == 0 && first_thunk == 0 &&
+            (!strict || (read32(image, offset + 4) == 0 && read32(image, offset + 8) == 0))) {
+            descriptors_terminated = true;
             break; // terminating descriptor
         }
         if (name_rva == 0 || first_thunk == 0 || name_rva >= image.size()) {
+            if (strict) {
+                return std::unexpected(LoadError::kBadImport);
+            }
             continue;
         }
-        const auto dll_name = read_c_string(image, name_rva);
+        const auto dll_name =
+            strict ? read_import_string(image, name_rva) : read_c_string(image, name_rva);
+        if (strict && dll_name.empty()) {
+            return std::unexpected(LoadError::kBadImport);
+        }
         const auto thunk_array = original_thunk != 0 ? original_thunk : first_thunk;
+        bool thunks_terminated = false;
         for (std::size_t t = 0; t < kMaxThunksPerDll; ++t) {
             const auto thunk_rva = first_thunk + t * layout.thunk_size;
             const auto lookup_rva = thunk_array + t * layout.thunk_size;
-            if (lookup_rva + layout.thunk_size > image.size()) {
+            if (lookup_rva + layout.thunk_size > image.size() ||
+                thunk_rva + layout.thunk_size > image.size()) {
+                if (strict) {
+                    return std::unexpected(LoadError::kBadImport);
+                }
                 break;
             }
             const auto thunk =
                 layout.thunk_size == 8 ? read64(image, lookup_rva) : read32(image, lookup_rva);
             if (thunk == 0) {
+                thunks_terminated = true;
                 break; // terminator
             }
             // import-by-name: low dword = hint/name RVA; import-by-ordinal:
@@ -406,6 +448,9 @@ resolve_imports(std::span<std::uint8_t> image, const std::vector<LoadedModule>& 
             // real corpora (kernelbase) import ntdll slots by ordinal.
             ResolvedExport resolved;
             if ((thunk & layout.ordinal_flag) != 0) {
+                if (strict && (thunk & ~(layout.ordinal_flag | 0xFFFFULL)) != 0) {
+                    return std::unexpected(LoadError::kBadImport);
+                }
                 const auto ordinal = static_cast<std::uint32_t>(thunk & 0xFFFF);
                 resolved = resolve_ordinal_export(modules, dll_name, ordinal, ctx, importer_name);
                 if (!resolved.ok) {
@@ -417,8 +462,15 @@ resolve_imports(std::span<std::uint8_t> image, const std::vector<LoadedModule>& 
                     continue;
                 }
             } else {
-                const auto function_name =
-                    read_c_string(image, static_cast<std::size_t>(thunk & 0xFFFFFFFF) + 2);
+                if (strict && (thunk > 0xFFFFFFFFULL || thunk + 3 > image.size())) {
+                    return std::unexpected(LoadError::kBadImport);
+                }
+                const auto name_offset = static_cast<std::size_t>(thunk & 0xFFFFFFFF) + 2;
+                const auto function_name = strict ? read_import_string(image, name_offset)
+                                                  : read_c_string(image, name_offset);
+                if (strict && function_name.empty()) {
+                    return std::unexpected(LoadError::kBadImport);
+                }
                 resolved = resolve_export(modules, dll_name, function_name, ctx, importer_name);
                 if (!resolved.ok) {
                     if (unresolved != nullptr) {
@@ -428,13 +480,174 @@ resolve_imports(std::span<std::uint8_t> image, const std::vector<LoadedModule>& 
                     continue;
                 }
             }
-            if (layout.thunk_size == 8) {
+            if (write && layout.thunk_size == 8) {
                 write64(image, thunk_rva, resolved.va);
-            } else {
+            } else if (write) {
                 write32(image, thunk_rva, static_cast<std::uint32_t>(resolved.va));
             }
             fixups.push_back({thunk_rva, resolved.va});
         }
+        if (strict && !thunks_terminated) {
+            return std::unexpected(LoadError::kBadImport);
+        }
+    }
+    if (strict && !descriptors_terminated) {
+        return std::unexpected(LoadError::kBadImport);
+    }
+    return fixups;
+}
+
+std::expected<std::vector<ImportFixup>, LoadError>
+bind_delayed_imports(std::span<std::uint8_t> image, const std::vector<LoadedModule>& modules,
+                     std::vector<UnresolvedImport>* unresolved, const ApiSetContext& ctx,
+                     const std::string_view importer_name, const bool write)
+{
+    // the tolerance never fills `unresolved` - misses ride the file's own
+    // static failure thunks; the parameter stays for caller symmetry
+    static_cast<void>(unresolved);
+    std::vector<ImportFixup> fixups;
+    const auto layout = detect_layout(image);
+    if (read32(image, layout.import_dir_offset - 12) <= 13) {
+        return fixups; // NumberOfRvaAndSizes does not declare directory(13)
+    }
+    // DataDirectory[13]: IMAGE_DIRECTORY_ENTRY_DELAY_IMPORT. The directory
+    // slot sits one fixed prefix past the optional header, mirroring the
+    // import directory's own placement.
+    const std::size_t delay_dir_offset = layout.import_dir_offset + 12 * 8;
+    if (delay_dir_offset + 8 > image.size()) {
+        return fixups; // no room for the directory slot: no delay imports
+    }
+    const auto delay_rva = read32(image, delay_dir_offset);
+    const auto delay_size = read32(image, delay_dir_offset + 4);
+    if (delay_rva == 0) {
+        return fixups; // no delay imports: clean no-op
+    }
+    // a directory that does not name in-image bytes is malformed, not absent
+    if (static_cast<std::uint64_t>(delay_rva) + 32 > image.size() || delay_size < 32 ||
+        delay_size > image.size() - delay_rva) {
+        return std::unexpected(LoadError::kBadDelayImport);
+    }
+
+    // The descriptor walk is bounded like every other untrusted-table walk.
+    // Write-value set (the capture corpus's .didat slot records): the IAT
+    // slots take the final resolved VAs and nothing else is written - the
+    // capture world's descriptor timestamp fields, module-handle slots,
+    // bound-IAT copies and unload tables all read zero/untouched with the
+    // IAT slots bound, so writing them would create diffs, not close them.
+    //
+    // Resolution misses are TOLERATED: the slot keeps its construction-input
+    // bytes, because MSVC statically initializes the failed-delay IAT
+    // entries to the module's own helper thunks and the real loader leaves
+    // them there (the capture corpus's slots match the file bytes +
+    // relocation delta slot-for-slot, 142/142 + 18/18 - an unresolved
+    // delayed dependency, the map not covering the contract, and a host
+    // missing the export all read as the file bytes in the captured world).
+    // Writing anything else - and rejecting outright - would create diffs,
+    // not close them. `unresolved` is therefore never filled here; only a
+    // malformed descriptor (VA form, out of range) is the named rejection.
+    auto offset = static_cast<std::size_t>(delay_rva);
+    const auto dir_end = static_cast<std::size_t>(delay_rva) + delay_size;
+    bool descriptors_terminated = false;
+    for (std::size_t d = 0; d < kMaxDescriptors && offset + 32 <= dir_end; ++d, offset += 32) {
+        if (offset + 32 > image.size()) {
+            return std::unexpected(LoadError::kBadDelayImport);
+        }
+        const auto gr_attrs = read32(image, offset);
+        const auto name_field = read32(image, offset + 4);
+        const auto phmod_field = read32(image, offset + 8);
+        const auto piat_field = read32(image, offset + 12);
+        const auto pint_field = read32(image, offset + 16);
+        if (gr_attrs == 0 && name_field == 0 && phmod_field == 0 && piat_field == 0 &&
+            pint_field == 0 && read32(image, offset + 20) == 0 && read32(image, offset + 24) == 0 &&
+            read32(image, offset + 28) == 0) {
+            descriptors_terminated = true;
+            break; // terminating descriptor
+        }
+        // RVA addressing only: a VA-form descriptor names absolute addresses
+        // in the image's preferred base - the construction never guesses one.
+        if (gr_attrs != 1) {
+            return std::unexpected(LoadError::kBadDelayImport);
+        }
+        if (name_field == 0 || name_field >= image.size() || piat_field == 0 ||
+            piat_field >= image.size()) {
+            return std::unexpected(LoadError::kBadDelayImport);
+        }
+        const auto dll_name = read_import_string(image, name_field);
+        if (dll_name.empty()) {
+            return std::unexpected(LoadError::kBadDelayImport);
+        }
+        // INT (import names) drives the lookup; IAT takes the resolved VAs.
+        // Either table missing is the malformed-descriptor rejection.
+        if (pint_field == 0 || pint_field >= image.size()) {
+            return std::unexpected(LoadError::kBadDelayImport);
+        }
+        if (phmod_field != 0 &&
+            static_cast<std::uint64_t>(phmod_field) + layout.thunk_size > image.size()) {
+            return std::unexpected(LoadError::kBadDelayImport);
+        }
+        bool thunks_terminated = false;
+        for (std::size_t t = 0; t < kMaxThunksPerDll; ++t) {
+            const auto iat_rva = piat_field + t * layout.thunk_size;
+            const auto lookup_rva = pint_field + t * layout.thunk_size;
+            if (lookup_rva + layout.thunk_size > image.size() ||
+                iat_rva + layout.thunk_size > image.size()) {
+                return std::unexpected(LoadError::kBadDelayImport);
+            }
+            for (const auto field : {read32(image, offset + 20), read32(image, offset + 24)}) {
+                if (field != 0 && static_cast<std::uint64_t>(field) + (t + 1) * layout.thunk_size >
+                                      image.size()) {
+                    return std::unexpected(LoadError::kBadDelayImport);
+                }
+            }
+            const auto thunk =
+                layout.thunk_size == 8 ? read64(image, lookup_rva) : read32(image, lookup_rva);
+            if (thunk == 0) {
+                thunks_terminated = true;
+                break; // terminator
+            }
+            ResolvedExport resolved;
+            if ((thunk & layout.ordinal_flag) != 0) {
+                if ((thunk & ~(layout.ordinal_flag | 0xFFFFULL)) != 0) {
+                    return std::unexpected(LoadError::kBadDelayImport);
+                }
+                const auto ordinal = static_cast<std::uint32_t>(thunk & 0xFFFF);
+                resolved = resolve_ordinal_export(modules, dll_name, ordinal, ctx, importer_name);
+            } else {
+                if (thunk > 0xFFFFFFFFULL) {
+                    return std::unexpected(LoadError::kBadDelayImport);
+                }
+                const auto name_thunk = static_cast<std::size_t>(thunk & 0xFFFFFFFF);
+                // the hint/name RVA must name in-image bytes: an out-of-range
+                // thunk is a malformed descriptor, not a tolerated miss
+                if (name_thunk + 3 > image.size()) {
+                    return std::unexpected(LoadError::kBadDelayImport);
+                }
+                const auto function_name = read_import_string(image, name_thunk + 2);
+                if (function_name.empty()) {
+                    return std::unexpected(LoadError::kBadDelayImport);
+                }
+                resolved = resolve_export(modules, dll_name, function_name, ctx, importer_name);
+            }
+            if (!resolved.ok) {
+                // tolerated miss: the slot keeps its construction-input bytes
+                // (the static failure thunk the file itself synthesizes)
+                continue;
+            }
+            if (write) {
+                if (layout.thunk_size == 8) {
+                    write64(image, iat_rva, resolved.va);
+                } else {
+                    write32(image, iat_rva, static_cast<std::uint32_t>(resolved.va));
+                }
+            }
+            fixups.push_back({iat_rva, resolved.va});
+        }
+        if (!thunks_terminated) {
+            return std::unexpected(LoadError::kBadDelayImport);
+        }
+    }
+    if (!descriptors_terminated) {
+        return std::unexpected(LoadError::kBadDelayImport);
     }
     return fixups;
 }

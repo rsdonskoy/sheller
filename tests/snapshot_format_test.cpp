@@ -3,6 +3,7 @@
 // golden after an intentional layout change with:
 //   SHELLER_REGEN_SNAPSHOT_GOLDEN=<path> snapshot_format_test
 
+#include <sheller/clock_policy.h>
 #include <sheller/snapshot.h>
 
 #include <gtest/gtest.h>
@@ -10,6 +11,7 @@
 #include <array>
 #include <cstdint>
 #include <cstdlib>
+#include <cstring>
 #include <filesystem>
 #include <fstream>
 #include <iterator>
@@ -396,7 +398,7 @@ TEST(SnapshotFormat, WritePendingRequiresV2Header)
 TEST(SnapshotFormat, UnknownFutureVersionStillRejected)
 {
     auto bytes = canonical_v2_snapshot();
-    bytes[snapshot::kVersionOffset] = 3; // beyond kVersionV2
+    bytes[snapshot::kVersionOffset] = 4; // beyond kVersionV3
     std::istringstream in(bytes);
     snapshot::Reader reader{in};
     EXPECT_EQ(reader.read_header().error(), snapshot::Error::kUnsupportedVersion);
@@ -423,6 +425,295 @@ TEST(SnapshotFormat, V2DuplicatePhysicalBlockRejected)
     ASSERT_TRUE(reader.read_region().has_value());
     ASSERT_TRUE(reader.read_region().has_value());
     ASSERT_TRUE(reader.read_pending().has_value()); // first block reads fine
+    // The engine close-out (load_snapshot_stream) rejects the trailing
+    // bytes; the codec-level proof is that the stream still has them.
+    char extra = 0;
+    in.get(extra);
+    EXPECT_TRUE(!in.eof()) << "fixture must actually carry a trailing block";
+}
+
+// --- v3: the clock-policy block (deterministic virtual clock) ---
+
+snapshot::ClockPolicy test_clock()
+{
+    snapshot::ClockPolicy clock = snapshot::default_clock_policy();
+    clock.base_tsc = 0x1234567890ABCDEFULL; // a non-default value: roundtrip proof
+    return clock;
+}
+
+// Canonical v3 container: the v1 body plus one trailing clock block (the EXE
+// shape - no pending block), written through the streaming path.
+std::string canonical_v3_snapshot(const bool with_pending = false)
+{
+    std::ostringstream out;
+    snapshot::Writer writer{out};
+    if (!writer.write_header(
+            snapshot::Header{.version = snapshot::kVersionV3, .bitness = snapshot::kBitness64}) ||
+        !writer.write_registers(test_registers()) || !writer.write_metadata(test_metadata()) ||
+        !writer.write_region(region_with_content(), region_content().data()) ||
+        !writer.write_region(region_without_content(), nullptr) ||
+        !writer.finalize_region_count()) {
+        ADD_FAILURE() << "canonical v3 snapshot serialization failed";
+        return {};
+    }
+    if (with_pending && !writer.write_pending(test_pending())) {
+        ADD_FAILURE() << "canonical v3 snapshot pending block failed";
+        return {};
+    }
+    if (!writer.write_clock(test_clock())) {
+        ADD_FAILURE() << "canonical v3 snapshot clock block failed";
+        return {};
+    }
+    return out.str();
+}
+
+TEST(SnapshotFormat, V3ClockRoundTrip)
+{
+    std::istringstream in(canonical_v3_snapshot());
+    snapshot::Reader reader{in};
+    const auto header = reader.read_header();
+    ASSERT_TRUE(header.has_value());
+    EXPECT_EQ(header->version, snapshot::kVersionV3);
+    ASSERT_TRUE(reader.read_registers().has_value());
+    ASSERT_TRUE(reader.read_metadata().has_value());
+    for (std::uint32_t i = 0; i < header->region_count; ++i) {
+        ASSERT_TRUE(reader.read_region().has_value());
+    }
+    const auto clock = reader.read_clock();
+    ASSERT_TRUE(clock.has_value()) << snapshot::error_message(clock.error());
+    EXPECT_EQ(*clock, test_clock());
+    // exactly one clock block per container
+    const auto again = reader.read_clock();
+    ASSERT_FALSE(again.has_value());
+    EXPECT_EQ(again.error(), snapshot::Error::kBadClock);
+}
+
+TEST(SnapshotFormat, V3PendingThenClockRoundTrip)
+{
+    // The DLL-input shape: pending block and clock block coexist, read in
+    // the trailing order, neither swallowing the other.
+    std::istringstream in(canonical_v3_snapshot(true));
+    snapshot::Reader reader{in};
+    const auto header = reader.read_header();
+    ASSERT_TRUE(header.has_value());
+    EXPECT_EQ(header->version, snapshot::kVersionV3);
+    ASSERT_TRUE(reader.read_registers().has_value());
+    ASSERT_TRUE(reader.read_metadata().has_value());
+    for (std::uint32_t i = 0; i < header->region_count; ++i) {
+        ASSERT_TRUE(reader.read_region().has_value());
+    }
+    const auto pending = reader.read_pending();
+    ASSERT_TRUE(pending.has_value()) << snapshot::error_message(pending.error());
+    EXPECT_EQ(*pending, test_pending());
+    const auto clock = reader.read_clock();
+    ASSERT_TRUE(clock.has_value()) << snapshot::error_message(clock.error());
+    EXPECT_EQ(*clock, test_clock());
+}
+
+TEST(SnapshotFormat, ReadClockOnV1AndV2IsRejected)
+{
+    // The new reader answers a clock read only on a v3 header: a v1/v2 file
+    // carries no clock block, and the call is out of place there.
+    {
+        std::istringstream in(canonical_snapshot());
+        snapshot::Reader reader{in};
+        ASSERT_TRUE(reader.read_header().has_value());
+        EXPECT_EQ(reader.read_clock().error(), snapshot::Error::kBadClock);
+    }
+    {
+        std::istringstream in(canonical_v2_snapshot());
+        snapshot::Reader reader{in};
+        ASSERT_TRUE(reader.read_header().has_value());
+        EXPECT_EQ(reader.read_clock().error(), snapshot::Error::kBadClock);
+    }
+}
+
+TEST(SnapshotFormat, V3ReaderAcceptsV1AndV2Containers)
+{
+    // The new reader's behavior on the legacy layouts must stay what it was
+    // before the v3 support: same parses, same products.
+    {
+        std::istringstream in(canonical_snapshot());
+        snapshot::Reader reader{in};
+        const auto header = reader.read_header();
+        ASSERT_TRUE(header.has_value());
+        EXPECT_EQ(header->version, snapshot::kVersion);
+        ASSERT_TRUE(reader.read_registers().has_value());
+        ASSERT_TRUE(reader.read_metadata().has_value());
+        const auto regions = read_all_regions(in, header->region_count);
+        ASSERT_TRUE(regions.has_value());
+        EXPECT_EQ(reader.read_pending().error(), snapshot::Error::kBadPending);
+        EXPECT_EQ(reader.read_clock().error(), snapshot::Error::kBadClock);
+    }
+    {
+        std::istringstream in(canonical_v2_snapshot());
+        snapshot::Reader reader{in};
+        const auto header = reader.read_header();
+        ASSERT_TRUE(header.has_value());
+        EXPECT_EQ(header->version, snapshot::kVersionV2);
+        ASSERT_TRUE(reader.read_registers().has_value());
+        ASSERT_TRUE(reader.read_metadata().has_value());
+        for (std::uint32_t i = 0; i < header->region_count; ++i) {
+            ASSERT_TRUE(reader.read_region().has_value());
+        }
+        const auto pending = reader.read_pending();
+        ASSERT_TRUE(pending.has_value());
+        EXPECT_EQ(*pending, test_pending());
+        // A v2 file never carries a clock block: the call is out of place.
+        EXPECT_EQ(reader.read_clock().error(), snapshot::Error::kBadClock);
+    }
+}
+
+TEST(SnapshotFormat, V3WithoutClockIsTruncated)
+{
+    // A v3 header whose trailing area carries no clock block: the read hits
+    // EOF (the engine close-out rejects the container; the codec names the
+    // truncation).
+    std::ostringstream out;
+    snapshot::Writer writer{out};
+    ASSERT_TRUE(writer.write_header(
+        snapshot::Header{.version = snapshot::kVersionV3, .bitness = snapshot::kBitness64}));
+    ASSERT_TRUE(writer.write_registers(test_registers()));
+    ASSERT_TRUE(writer.write_metadata(test_metadata()));
+    ASSERT_TRUE(writer.write_region(region_without_content(), nullptr));
+    ASSERT_TRUE(writer.finalize_region_count());
+
+    std::istringstream in(out.str());
+    snapshot::Reader reader{in};
+    ASSERT_TRUE(reader.read_header().has_value());
+    ASSERT_TRUE(reader.read_registers().has_value());
+    ASSERT_TRUE(reader.read_metadata().has_value());
+    ASSERT_TRUE(reader.read_region().has_value());
+    EXPECT_EQ(reader.read_clock().error(), snapshot::Error::kTruncated);
+}
+
+TEST(SnapshotFormat, V3TruncatedClockPayloadIsRejected)
+{
+    const auto v3 = canonical_v3_snapshot();
+    std::istringstream in(v3.substr(0, v3.size() - 3));
+    snapshot::Reader reader{in};
+    ASSERT_TRUE(reader.read_header().has_value());
+    ASSERT_TRUE(reader.read_registers().has_value());
+    ASSERT_TRUE(reader.read_metadata().has_value());
+    ASSERT_TRUE(reader.read_region().has_value());
+    ASSERT_TRUE(reader.read_region().has_value());
+    EXPECT_EQ(reader.read_clock().error(), snapshot::Error::kTruncated);
+}
+
+TEST(SnapshotFormat, V3CorruptClockMarkerIsRejected)
+{
+    auto v3 = canonical_v3_snapshot();
+    // The clock block starts right after the v1 body; corrupt its marker.
+    const auto v1_body = snapshot::kHeaderSize + snapshot::kRegistersSize +
+                         snapshot::kMetadataSize + 2 * snapshot::kRegionRecordSize + 16;
+    ASSERT_EQ(v3.compare(v1_body, sizeof snapshot::kClockMarker,
+                         reinterpret_cast<const char*>(snapshot::kClockMarker),
+                         sizeof snapshot::kClockMarker),
+              0);
+    v3[v1_body] = 'X';
+    std::istringstream in(v3);
+    snapshot::Reader reader{in};
+    ASSERT_TRUE(reader.read_header().has_value());
+    ASSERT_TRUE(reader.read_registers().has_value());
+    ASSERT_TRUE(reader.read_metadata().has_value());
+    ASSERT_TRUE(reader.read_region().has_value());
+    ASSERT_TRUE(reader.read_region().has_value());
+    EXPECT_EQ(reader.read_clock().error(), snapshot::Error::kBadClock);
+}
+
+TEST(SnapshotFormat, V3ClockWithForeignVersionOrPayloadLengthIsRejected)
+{
+    // An unknown policy version, or a payload length that does not match the
+    // known field layout, must not survive as shifted reads.
+    for (const int field : {0, 1}) {
+        auto v3 = canonical_v3_snapshot();
+        const auto v1_body = snapshot::kHeaderSize + snapshot::kRegistersSize +
+                             snapshot::kMetadataSize + 2 * snapshot::kRegionRecordSize + 16;
+        const auto block_at = v1_body + sizeof snapshot::kClockMarker;
+        if (field == 0) {
+            std::memcpy(v3.data() + block_at, "\xab\xcd\x00\x00", 4); // policy version
+        } else {
+            std::memcpy(v3.data() + block_at + sizeof(std::uint32_t), "\x49\x00\x00\x00",
+                        4); // payload length != 72
+        }
+        std::istringstream in(v3);
+        snapshot::Reader reader{in};
+        ASSERT_TRUE(reader.read_header().has_value());
+        ASSERT_TRUE(reader.read_registers().has_value());
+        ASSERT_TRUE(reader.read_metadata().has_value());
+        ASSERT_TRUE(reader.read_region().has_value());
+        ASSERT_TRUE(reader.read_region().has_value());
+        EXPECT_EQ(reader.read_clock().error(), snapshot::Error::kBadClock) << "field " << field;
+    }
+}
+
+TEST(SnapshotFormat, V3ClockWithEngineUnsafePolicyIsRejected)
+{
+    // blocks_per_tick = 0 (divide by zero in the tick publish) and
+    // qpc_frequency = 0 (the frequency face must be nonzero) are refused by
+    // both writer and reader.
+    for (const int field : {0, 1}) {
+        auto clock = test_clock();
+        if (field == 0) {
+            clock.blocks_per_tick = 0;
+        } else {
+            clock.qpc_frequency = 0;
+        }
+        {
+            std::ostringstream out;
+            snapshot::Writer writer{out};
+            ASSERT_TRUE(writer.write_header(snapshot::Header{.version = snapshot::kVersionV3,
+                                                             .bitness = snapshot::kBitness64}));
+            ASSERT_TRUE(writer.finalize_region_count());
+            EXPECT_EQ(writer.write_clock(clock).error(), snapshot::Error::kBadClock);
+        }
+        {
+            // Reader-side: hand-patch a well-formed block's field to zero.
+            auto v3 = canonical_v3_snapshot();
+            const auto v1_body = snapshot::kHeaderSize + snapshot::kRegistersSize +
+                                 snapshot::kMetadataSize + 2 * snapshot::kRegionRecordSize + 16;
+            const auto field_at = field == 0 ? v1_body + snapshot::kClockBlocksPerTickOffset
+                                             : v1_body + snapshot::kClockQpcFrequencyOffset;
+            const std::array<char, 8> zeros{};
+            std::memcpy(v3.data() + field_at, zeros.data(), zeros.size());
+            std::istringstream in(v3);
+            snapshot::Reader reader{in};
+            ASSERT_TRUE(reader.read_header().has_value());
+            ASSERT_TRUE(reader.read_registers().has_value());
+            ASSERT_TRUE(reader.read_metadata().has_value());
+            ASSERT_TRUE(reader.read_region().has_value());
+            ASSERT_TRUE(reader.read_region().has_value());
+            EXPECT_EQ(reader.read_clock().error(), snapshot::Error::kBadClock) << "field " << field;
+        }
+    }
+}
+
+TEST(SnapshotFormat, WriteClockRequiresV3Header)
+{
+    std::ostringstream out;
+    snapshot::Writer writer{out};
+    ASSERT_TRUE(writer.write_header(
+        snapshot::Header{.version = snapshot::kVersionV2, .bitness = snapshot::kBitness64}));
+    ASSERT_TRUE(writer.finalize_region_count());
+    EXPECT_EQ(writer.write_clock(test_clock()).error(), snapshot::Error::kBadClock);
+}
+
+TEST(SnapshotFormat, V3DuplicatePhysicalClockBlockRejected)
+{
+    const auto v3 = canonical_v3_snapshot();
+    const auto v1_body = snapshot::kHeaderSize + snapshot::kRegistersSize +
+                         snapshot::kMetadataSize + 2 * snapshot::kRegionRecordSize + 16;
+    std::string doubled = v3;
+    doubled.append(v3, v1_body, v3.size() - v1_body);
+
+    std::istringstream in(doubled);
+    snapshot::Reader reader{in};
+    ASSERT_TRUE(reader.read_header().has_value());
+    ASSERT_TRUE(reader.read_registers().has_value());
+    ASSERT_TRUE(reader.read_metadata().has_value());
+    ASSERT_TRUE(reader.read_region().has_value());
+    ASSERT_TRUE(reader.read_region().has_value());
+    ASSERT_TRUE(reader.read_clock().has_value()); // first block reads fine
     // The engine close-out (load_snapshot_stream) rejects the trailing
     // bytes; the codec-level proof is that the stream still has them.
     char extra = 0;

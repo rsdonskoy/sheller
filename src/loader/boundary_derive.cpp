@@ -19,18 +19,6 @@ constexpr std::uint32_t kDataDirectoryOffset64 = 112; // PE32+ optional+0x70
 constexpr std::uint32_t kDataDirectoryOffset32 = 96;  // PE32  optional+0x60
 constexpr std::uint16_t kMachineAmd64 = 0x8664;
 
-// Derived-image layout: one code section carrying the body slots, the
-// rebuilt export directory and the data slots (the engine maps resident
-// modules RWX anyway; a second section would only duplicate that decision).
-// ntdll keeps the engine's weld-slot parity with the synthetic generator:
-// .text padded to 0x40000, .data at 0x41000.
-constexpr std::uint32_t kDeriveSectionRva = 0x1000;
-constexpr std::uint32_t kDeriveHeadersBytes = 0x1000;
-constexpr std::uint32_t kDeriveStubStride = 16;
-constexpr std::uint32_t kNtdllWeldDataSize = 0x200;
-constexpr std::uint32_t kNtdllSizeOfImage =
-    kBoundaryNtdllWeldDataRva + 0x1000; // 0x42000, matching the generator
-
 // Bounded walks over untrusted directory files (same discipline as
 // imports.cpp's caps).
 constexpr std::uint32_t kMaxFunctions = 16384;
@@ -83,8 +71,9 @@ std::optional<std::size_t> rva_to_file_offset(const ImageInfo& info,
                                               std::span<const std::uint8_t> file,
                                               const std::uint32_t rva)
 {
+    constexpr std::uint32_t kHeadersBytes = 0x1000;
     if (info.sections.empty() || rva < info.sections.front().virtual_address) {
-        if (rva < kDeriveHeadersBytes && rva < file.size()) {
+        if (rva < kHeadersBytes && rva < file.size()) {
             return static_cast<std::size_t>(rva);
         }
         return std::nullopt;
@@ -120,7 +109,7 @@ BoundaryDeriveFailure fail(const BoundaryDeriveError code, std::string detail)
 }
 
 // One source EAT slot: the function RVA plus every name that resolves to it
-// (in source name-array order - the alias spelling the derived image keeps).
+// (in source name-array order - the disposition records keep the spelling).
 struct SourceExport {
     std::uint32_t function_rva{};
     std::vector<std::string> names;
@@ -132,7 +121,7 @@ struct SourceExports {
     std::uint32_t directory_size{};
     std::vector<SourceExport> functions; // EAT index order
     // (EAT index, name position) in the source names-array walking order -
-    // the derived names array preserves this exact order.
+    // the disposition records preserve this exact order.
     std::vector<std::pair<std::uint32_t, std::size_t>> name_order;
 };
 
@@ -230,57 +219,37 @@ bool is_forwarder_rva(const SourceExports& source, const std::uint32_t function_
            function_rva < source.directory_rva + source.directory_size;
 }
 
-// The body recipe each derived kind emits (all fit the 16-byte stride;
-// bytes only - the engine's intercept/registration layers key on the VA).
-std::vector<std::uint8_t> stub_body(const BoundaryKind kind, const std::uint32_t syscall_number,
-                                    const std::uint64_t compat_return)
+// The image bytes over [rva, rva+bytes). The folded image maps RVA ==
+// offset inside the header block and every section's virtual span, so the
+// range check plus the section walk settles mapped-ness. A whitelist write
+// or read lands only when the WHOLE span sits inside one mapped region - a
+// span straddling a section end into an inter-section gap is not mapped.
+bool rva_span_mapped(const ImageInfo& info, const std::uint64_t image_size, const std::uint32_t rva,
+                     const std::uint64_t bytes)
 {
-    switch (kind) {
-    case BoundaryKind::kSyscallStub: {
-        // canonical Win10+ x64 shape: mov r10, rcx; mov eax, imm32; syscall; ret
-        std::vector<std::uint8_t> body{0x4C, 0x8B, 0xD1, 0xB8};
-        for (unsigned i = 0; i < 4; ++i) {
-            body.push_back(static_cast<std::uint8_t>(syscall_number >> (8 * i)));
+    if (rva >= image_size || bytes > image_size - rva) {
+        return false;
+    }
+    const auto header_end = std::min<std::uint64_t>(
+        image_size,
+        std::max<std::uint64_t>(0x400, std::max(info.size_of_headers, info.table_end_rva)));
+    if (rva < header_end && bytes <= header_end - rva) {
+        return true;
+    }
+    for (const auto& section : info.sections) {
+        const auto span = std::max(section.virtual_size, section.raw_size);
+        if (span == 0 || rva < section.virtual_address) {
+            continue;
         }
-        body.push_back(0x0F);
-        body.push_back(0x05);
-        body.push_back(0xC3);
-        return body;
-    }
-    case BoundaryKind::kTrap:
-        // ud2: the registered terminator owns the stop; the bytes are the
-        // catch-all that never answers a caller
-        return {0x0F, 0x0B};
-    case BoundaryKind::kCompat: {
-        // mov eax/rax, imm; ret - the manifest's per-function answer, with
-        // no family-wide default anywhere near it.
-        std::vector<std::uint8_t> body;
-        if (compat_return <= 0xFFFFFFFFULL) {
-            body.push_back(0xB8);
-            for (unsigned i = 0; i < 4; ++i) {
-                body.push_back(static_cast<std::uint8_t>(compat_return >> (8 * i)));
-            }
-        } else {
-            body.push_back(0x48);
-            body.push_back(0xB8);
-            for (unsigned i = 0; i < 8; ++i) {
-                body.push_back(static_cast<std::uint8_t>(compat_return >> (8 * i)));
-            }
+        const auto offset_in_section = static_cast<std::uint64_t>(rva - section.virtual_address);
+        if (offset_in_section >= span) {
+            continue;
         }
-        body.push_back(0xC3);
-        return body;
+        if (bytes <= span - offset_in_section) {
+            return true; // the whole span sits inside this section
+        }
     }
-    case BoundaryKind::kIntercept:
-    default:
-        // the entry is replaced wholesale by the engine implementation; the
-        // body only has to be a deterministic, self-contained return
-        return {0x31, 0xC0, 0xC3}; // xor eax, eax; ret
-    }
-}
-
-constexpr std::uint32_t align_up(const std::uint32_t value, const std::uint32_t alignment)
-{
-    return (value + alignment - 1) / alignment * alignment;
+    return false;
 }
 
 } // namespace
@@ -326,7 +295,7 @@ std::optional<std::uint32_t> syscall_stub_number_from_bytes(std::span<const std:
 
 std::expected<DerivedBoundary, BoundaryDeriveFailure>
 derive_boundary_image(std::span<const std::uint8_t> file, const std::string_view module_name,
-                      const std::vector<BoundaryRule>& rules)
+                      const std::vector<BoundaryRule>& rules, const std::uint64_t base)
 {
     const auto info = parse_pe(file);
     if (!info.has_value()) {
@@ -341,6 +310,54 @@ derive_boundary_image(std::span<const std::uint8_t> file, const std::string_view
             fail(BoundaryDeriveError::kUnsupportedMachine,
                  std::format("{}: i386 boundary images are not derived", module_name)));
     }
+
+    // The real file is the base: fold it, then take the same relocation
+    // pipeline as every real-byte module (a base move without a usable
+    // relocation table is the named rejection - no half-fixed image).
+    auto image = build_image(file, *info);
+    if (!image.has_value()) {
+        return std::unexpected(fail(BoundaryDeriveError::kBadSource,
+                                    std::format("{}: image build failed: {}", module_name,
+                                                load_error_message(image.error()))));
+    }
+    const auto delta = base - info->image_base;
+    if (delta != 0 && info->reloc_directory_rva != 0 && info->reloc_directory_size != 0) {
+        if (const auto valid = validate_relocations(*image, *info); !valid.has_value()) {
+            return std::unexpected(fail(BoundaryDeriveError::kBadSource,
+                                        std::format("{}: relocation table names targets outside "
+                                                    "the image",
+                                                    module_name)));
+        }
+        if (const auto relocated = apply_relocations(*image, *info, delta);
+            !relocated.has_value()) {
+            return std::unexpected(fail(BoundaryDeriveError::kBadSource,
+                                        std::format("{}: relocation failed: {}", module_name,
+                                                    load_error_message(relocated.error()))));
+        }
+    } else if (delta != 0) {
+        return std::unexpected(
+            fail(BoundaryDeriveError::kBadSource,
+                 std::format("{}: mapped at 0x{:x} but carries no relocation directory",
+                             module_name, base)));
+    }
+
+    // The whitelist's marker slot precondition: the engine writes the
+    // directory-mode marker into the reserved DOS e_res2 slot, so the
+    // source must keep it zero (a dirty slot would make the marker write
+    // overwrite real bytes - rejected here, before anything maps).
+    bool marker_slot_zero = true;
+    for (std::uint32_t i = 0; i < kBoundaryMarkerSize; ++i) {
+        if ((*image)[kBoundaryMarkerOffset + i] != 0) {
+            marker_slot_zero = false;
+            break;
+        }
+    }
+    if (!marker_slot_zero) {
+        return std::unexpected(
+            fail(BoundaryDeriveError::kBadSource,
+                 std::format("{}: the reserved DOS e_res2 marker slot is not zero", module_name)));
+    }
+
     const auto source = walk_source_exports(file, *info);
     if (!source.has_value()) {
         return std::unexpected(source.error());
@@ -362,14 +379,14 @@ derive_boundary_image(std::span<const std::uint8_t> file, const std::string_view
     }
 
     // Classification pass over the source exports, EAT order. Aliases
-    // produce one disposition per name, all sharing the ordinal's body.
+    // produce one disposition per name, all sharing the ordinal's address.
+    // No body is emitted: the dispositions ride the runtime table, and the
+    // only image writes are the whitelist slots below.
     struct Classified {
         DerivedBoundaryExport record;
         std::uint32_t source_index{}; // EAT index the disposition belongs to
         const BoundaryRule* rule{};
-        bool has_body{};
-        std::vector<std::uint8_t> data_bytes;
-        std::uint32_t data_align{};
+        std::vector<std::uint8_t> data_bytes; // kData, when the slot writes
     };
     std::vector<Classified> classified;
     const auto classify =
@@ -389,6 +406,7 @@ derive_boundary_image(std::span<const std::uint8_t> file, const std::string_view
         Classified item;
         item.record.name = name;
         item.record.ordinal = true_ordinal;
+        item.record.body_rva = slot.function_rva;
         item.source_index = source_index;
         if (slot.function_rva == 0) {
             // EAT hole: preserved as an empty entry; no rule can give it a
@@ -399,13 +417,15 @@ derive_boundary_image(std::span<const std::uint8_t> file, const std::string_view
                          std::format("{}!{}: rule targets an empty EAT entry", module_name, name)));
             }
             item.record.kind = BoundaryKind::kEmpty;
+            item.record.body_rva = 0;
             classified.push_back(std::move(item));
             return {};
         }
         if (is_forwarder_rva(*source, slot.function_rva)) {
-            // Forwarder relation: preserved verbatim, classified along the
-            // chain at bind time. A rule here means the manifest and the
-            // source disagree about what this name is.
+            // Forwarder relation: preserved verbatim - the EAT keeps the
+            // string's RVA inside the mapped export directory, classified
+            // along the chain at bind time. A rule here means the manifest
+            // and the source disagree about what this name is.
             auto target_offset = rva_to_file_offset(*info, file, slot.function_rva);
             if (!target_offset.has_value()) {
                 return std::unexpected(
@@ -441,6 +461,8 @@ derive_boundary_image(std::span<const std::uint8_t> file, const std::string_view
         item.record.kind = rule->kind;
         switch (rule->kind) {
         case BoundaryKind::kSyscallStub: {
+            // the number is validated against the source body bytes - the
+            // stub keeps those bytes, no shape is synthesized
             const auto body_offset = rva_to_file_offset(*info, file, slot.function_rva);
             const auto body =
                 body_offset.has_value()
@@ -458,13 +480,35 @@ derive_boundary_image(std::span<const std::uint8_t> file, const std::string_view
                                                         module_name, name)));
             }
             item.record.syscall_number = *number;
-            item.has_body = true;
             break;
         }
         case BoundaryKind::kIntercept:
+            // whitelist slot (c): the hook-miss guard body is written at the
+            // export's own address below (the engine hook owns the answer)
+            if (!rva_span_mapped(*info, image->size(), slot.function_rva, 3)) {
+                return std::unexpected(fail(BoundaryDeriveError::kManifestMismatch,
+                                            std::format("{}!{}: stub body RVA 0x{:x} is not mapped",
+                                                        module_name, name, slot.function_rva)));
+            }
+            break;
         case BoundaryKind::kTrap:
+            // the engine-side runtime table owns the disposition (the trap
+            // stops the run at the block boundary) - the source bytes stay
+            // untouched
+            break;
         case BoundaryKind::kCompat:
-            item.has_body = true;
+            // whitelist slot (c): the manifest's per-function answer is
+            // written at the export's own address below (6 bytes for a
+            // 32-bit answer, 11 for a 64-bit one)
+            {
+                const auto body_bytes = rule->compat_return <= 0xFFFFFFFFULL ? 6ULL : 11ULL;
+                if (!rva_span_mapped(*info, image->size(), slot.function_rva, body_bytes)) {
+                    return std::unexpected(
+                        fail(BoundaryDeriveError::kManifestMismatch,
+                             std::format("{}!{}: stub body RVA 0x{:x} is not mapped", module_name,
+                                         name, slot.function_rva)));
+                }
+            }
             break;
         case BoundaryKind::kData: {
             if (rule->data_size == 0 || rule->data_size > kMaxDataSlotBytes ||
@@ -477,8 +521,22 @@ derive_boundary_image(std::span<const std::uint8_t> file, const std::string_view
                                      module_name, name, rule->data_size, rule->data_bytes.size(),
                                      rule->data_align)));
             }
-            item.data_bytes = rule->data_bytes;
-            item.data_align = std::max(rule->data_align, 8u);
+            // whitelist slot (b): the slot resolves to the real address; the
+            // manifest's bytes only land when the mapped slot is free (all
+            // zero - no real content to overwrite)
+            if (!rva_span_mapped(*info, image->size(), slot.function_rva, rule->data_size)) {
+                return std::unexpected(fail(BoundaryDeriveError::kManifestMismatch,
+                                            std::format("{}!{}: data slot RVA 0x{:x} is not mapped",
+                                                        module_name, name, slot.function_rva)));
+            }
+            const auto at = static_cast<std::size_t>(slot.function_rva);
+            const bool slot_free =
+                std::all_of(image->begin() + static_cast<std::ptrdiff_t>(at),
+                            image->begin() + static_cast<std::ptrdiff_t>(at + rule->data_size),
+                            [](const std::uint8_t b) { return b == 0; });
+            if (slot_free) {
+                item.data_bytes = rule->data_bytes;
+            }
             break;
         }
         case BoundaryKind::kForwarder:
@@ -506,9 +564,10 @@ derive_boundary_image(std::span<const std::uint8_t> file, const std::string_view
         }
     }
 
-    // Alias integrity: names sharing one EAT index share the target's body
-    // and therefore its disposition - a manifest that assigns them different
-    // kinds (or different compat answers) disagrees with its own aliases.
+    // Alias integrity: names sharing one EAT index share the target's
+    // address and therefore its disposition - a manifest that assigns them
+    // different kinds (or different compat answers) disagrees with its own
+    // aliases.
     for (std::size_t i = 1; i < classified.size(); ++i) {
         const auto& item = classified[i];
         if (item.record.kind == BoundaryKind::kForwarder ||
@@ -534,259 +593,44 @@ derive_boundary_image(std::span<const std::uint8_t> file, const std::string_view
         }
     }
 
-    // Layout pass. Code slots first (source ordinal order; aliases share the
-    // ordinal's one slot), then the rebuilt export directory, then the
-    // preserved forwarder strings, then the data slots at their per-rule
-    // alignments. Per-ordinal RVAs live in one map so the EAT emission and
-    // the dispositions read the same addresses.
-    const bool is_ntdll = module_name == "ntdll.dll";
-    std::map<std::uint32_t, std::uint32_t> rva_by_ordinal;
-    std::uint32_t cursor = kDeriveSectionRva;
+    // The whitelist writes, disposition order. Everything outside this loop
+    // keeps the load-pipeline bytes (the pin test holds the image against
+    // the plain loaded image except these slots).
     for (const auto& item : classified) {
-        if (!item.has_body) {
-            continue;
-        }
-        if (rva_by_ordinal.emplace(item.source_index, cursor).second) {
-            cursor += kDeriveStubStride;
-        }
-    }
-    const auto export_dir_rva = align_up(cursor, 16);
-    cursor = export_dir_rva + 40; // IMAGE_EXPORT_DIRECTORY
-    const auto eat_rva = cursor;
-    cursor += 4 * static_cast<std::uint32_t>(source->functions.size());
-    const auto names_array_rva = cursor;
-    const auto named_count = source->name_order.size();
-    cursor += 4 * static_cast<std::uint32_t>(named_count);
-    const auto ordinals_array_rva = cursor;
-    cursor += 2 * static_cast<std::uint32_t>(named_count);
-    const auto module_name_rva = cursor;
-    cursor += static_cast<std::uint32_t>(module_name.size()) + 1;
-    // name strings in source name-array order
-    std::vector<std::uint32_t> name_string_rvas(named_count, 0);
-    for (std::size_t i = 0; i < named_count; ++i) {
-        const auto& name =
-            source->functions[source->name_order[i].first].names[source->name_order[i].second];
-        name_string_rvas[i] = cursor;
-        cursor += static_cast<std::uint32_t>(name.size()) + 1;
-    }
-    // forwarder strings, one per forwarded ordinal (aliases share the slot)
-    for (const auto& item : classified) {
-        if (!item.record.forwarded) {
-            continue;
-        }
-        if (rva_by_ordinal.emplace(item.source_index, cursor).second) {
-            cursor += static_cast<std::uint32_t>(item.record.forwarder_target.size()) + 1;
-        }
-    }
-    // data slots: per-rule alignment, disposition order
-    for (const auto& item : classified) {
-        if (item.record.kind != BoundaryKind::kData) {
-            continue;
-        }
-        if (rva_by_ordinal.emplace(item.source_index, align_up(cursor, item.data_align)).second) {
-            cursor = align_up(cursor, item.data_align) +
-                     static_cast<std::uint32_t>(item.data_bytes.size());
-        }
-    }
-    auto content_end = cursor;
-    std::uint32_t size_of_image = align_up(content_end, kDeriveSectionRva);
-    if (is_ntdll) {
-        // weld-slot parity: .text spans the fixed 0x40000, .data follows
-        if (content_end > kBoundaryNtdllTextSpan) {
-            return std::unexpected(
-                fail(BoundaryDeriveError::kBadSource,
-                     std::format("{}: derived content 0x{:x} overflows the "
-                                 "weld-slot .text span 0x{:x}",
-                                 module_name, content_end, kBoundaryNtdllTextSpan)));
-        }
-        content_end = kBoundaryNtdllTextSpan;
-        size_of_image = kNtdllSizeOfImage;
-    }
-    // every disposition now carries its final RVA
-    for (auto& item : classified) {
-        const auto rva = rva_by_ordinal.find(item.source_index);
-        item.record.body_rva =
-            rva != rva_by_ordinal.end() ? static_cast<std::uint64_t>(rva->second) : 0;
-    }
-
-    // Emission.
-    std::vector<std::uint8_t> image(kDeriveHeadersBytes, 0);
-    // DOS header: MZ and e_lfanew only - every other field, including the
-    // reserved e_res2 marker slot at 0x28..0x3B, stays zero.
-    image[0] = 'M';
-    image[1] = 'Z';
-    constexpr std::size_t kPeOffset = 0x7C;
-    image[kELfanewOffset] = static_cast<std::uint8_t>(kPeOffset);
-    // PE signature + COFF: AMD64, PE32+ optional header
-    image.resize(kPeOffset + 4, 0);
-    std::memcpy(image.data() + kPeOffset, "PE\0\0", 4);
-    const std::size_t section_count = is_ntdll ? 2 : 1;
-    {
-        std::vector<std::uint8_t> file_header;
-        const auto put16 = [&file_header](const std::uint16_t v) {
-            file_header.push_back(static_cast<std::uint8_t>(v));
-            file_header.push_back(static_cast<std::uint8_t>(v >> 8));
-        };
-        const auto put32 = [&file_header](const std::uint32_t v) {
-            for (unsigned i = 0; i < 4; ++i) {
-                file_header.push_back(static_cast<std::uint8_t>(v >> (8 * i)));
+        const auto at = static_cast<std::size_t>(item.record.body_rva);
+        if (item.record.kind == BoundaryKind::kCompat) {
+            // (c) the compat stub body: deterministic return at the export's
+            // own address (aliases share the one address)
+            const auto compat_return = item.rule->compat_return;
+            std::vector<std::uint8_t> body;
+            if (compat_return <= 0xFFFFFFFFULL) {
+                body.push_back(0xB8);
+                for (unsigned i = 0; i < 4; ++i) {
+                    body.push_back(static_cast<std::uint8_t>(compat_return >> (8 * i)));
+                }
+            } else {
+                body.push_back(0x48);
+                body.push_back(0xB8);
+                for (unsigned i = 0; i < 8; ++i) {
+                    body.push_back(static_cast<std::uint8_t>(compat_return >> (8 * i)));
+                }
             }
-        };
-        put16(kMachineAmd64);
-        put16(static_cast<std::uint16_t>(section_count));
-        put32(0);    // time date stamp
-        put32(0);    // symbol table RVA
-        put32(0);    // symbol count
-        put16(0xF0); // size of optional header (PE32+)
-        put16(0x2022);
-        image.insert(image.end(), file_header.begin(), file_header.end());
-    }
-    {
-        std::vector<std::uint8_t> opt(0xF0, 0);
-        const auto put = [&opt](const std::size_t at, const std::uint32_t v) {
-            for (unsigned i = 0; i < 4; ++i) {
-                opt[at + i] = static_cast<std::uint8_t>(v >> (8 * i));
-            }
-        };
-        opt[0] = 0x0B;
-        opt[1] = 0x02; // PE32+ magic
-        std::size_t code_bytes = 0;
-        for (const auto& item : classified) {
-            if (item.has_body) {
-                code_bytes += kDeriveStubStride;
-            }
+            body.push_back(0xC3);
+            std::memcpy(image->data() + at, body.data(), body.size());
+        } else if (item.record.kind == BoundaryKind::kIntercept) {
+            // (c) the intercepted entry: a deterministic, self-contained
+            // return - the engine hook owns the answer, the body only
+            // guards a hook miss
+            constexpr std::array<std::uint8_t, 3> kInterceptBody{0x31, 0xC0, 0xC3};
+            std::memcpy(image->data() + at, kInterceptBody.data(), kInterceptBody.size());
+        } else if (!item.data_bytes.empty()) {
+            // (b) the free data slot takes the manifest's known bytes
+            std::memcpy(image->data() + at, item.data_bytes.data(), item.data_bytes.size());
         }
-        put(4, static_cast<std::uint32_t>(code_bytes));
-        // AddressOfEntryPoint: the first code slot (derived modules never
-        // run an entry; the field keeps the image shape conventional)
-        const auto entry = std::find_if(classified.begin(), classified.end(),
-                                        [](const Classified& c) { return c.has_body; });
-        put(16, entry == classified.end() ? 0 : static_cast<std::uint32_t>(entry->record.body_rva));
-        put(20, kDeriveSectionRva); // BaseOfCode
-        put(24, 0x400000);          // ImageBase (PE32+; high dword stays zero)
-        put(32, kDeriveSectionRva); // SectionAlignment
-        put(36, kDeriveSectionRva); // FileAlignment
-        put(56, size_of_image);
-        put(60, kDeriveHeadersBytes); // SizeOfHeaders
-        opt[68] = 3;                  // SubSystem console
-        put(108, 16);                 // NumberOfRvaAndSizes
-        // DataDirectory[0]: the rebuilt export directory
-        put(112, export_dir_rva);
-        std::uint32_t directory_size = 40;
-        directory_size += 4 * static_cast<std::uint32_t>(source->functions.size());
-        directory_size += 4 * static_cast<std::uint32_t>(named_count);
-        directory_size += 2 * static_cast<std::uint32_t>(named_count);
-        directory_size += static_cast<std::uint32_t>(module_name.size()) + 1;
-        for (std::size_t i = 0; i < named_count; ++i) {
-            const auto& name =
-                source->functions[source->name_order[i].first].names[source->name_order[i].second];
-            directory_size += static_cast<std::uint32_t>(name.size()) + 1;
-        }
-        for (const auto& item : classified) {
-            if (item.record.forwarded) {
-                directory_size +=
-                    static_cast<std::uint32_t>(item.record.forwarder_target.size()) + 1;
-            }
-        }
-        put(116, directory_size);
-        image.insert(image.end(), opt.begin(), opt.end());
-    }
-    // Section table: .text (bodies + directory + data) plus the ntdll weld
-    // .data. Raw pointers keep RVA == file offset inside the section.
-    std::vector<std::uint8_t> sections(section_count * 40, 0);
-    const auto fill_section = [&](const std::size_t index, const char* name,
-                                  const std::uint32_t virtual_size, const std::uint32_t rva,
-                                  const std::uint32_t raw_size, const std::uint32_t raw_pointer,
-                                  const std::uint32_t characteristics) {
-        auto* at = sections.data() + index * 40;
-        std::memcpy(at, name, std::min<std::size_t>(std::strlen(name), 8));
-        const auto put = [at](const std::size_t field, const std::uint32_t v) {
-            for (unsigned i = 0; i < 4; ++i) {
-                at[field + i] = static_cast<std::uint8_t>(v >> (8 * i));
-            }
-        };
-        put(8, virtual_size);
-        put(12, rva);
-        put(16, raw_size);
-        put(20, raw_pointer);
-        put(36, characteristics);
-    };
-    const auto text_raw = is_ntdll ? kBoundaryNtdllTextSpan : content_end - kDeriveSectionRva;
-    fill_section(0, ".text", content_end - kDeriveSectionRva, kDeriveSectionRva, text_raw,
-                 kDeriveHeadersBytes, 0x60000020);
-    if (is_ntdll) {
-        fill_section(1, ".data", kNtdllWeldDataSize, kBoundaryNtdllWeldDataRva, kNtdllWeldDataSize,
-                     kDeriveHeadersBytes + text_raw, 0xC0000040);
-    }
-    image.insert(image.end(), sections.begin(), sections.end());
-    image.resize(static_cast<std::size_t>(kDeriveHeadersBytes) + text_raw, 0);
-
-    // .text payload
-    const auto put_at = [&image](const std::uint32_t rva, const std::uint32_t value) {
-        const auto at = static_cast<std::size_t>(rva);
-        for (unsigned i = 0; i < 4; ++i) {
-            image[at + i] = static_cast<std::uint8_t>(value >> (8 * i));
-        }
-    };
-    const auto put_string = [&image](const std::uint32_t rva, const std::string_view text) {
-        const auto at = static_cast<std::size_t>(rva);
-        std::memcpy(image.data() + at, text.data(), text.size());
-        image[at + text.size()] = 0;
-    };
-    for (const auto& item : classified) {
-        if (!item.has_body) {
-            continue;
-        }
-        const auto body = stub_body(item.record.kind, item.record.syscall_number,
-                                    item.rule != nullptr ? item.rule->compat_return : 0);
-        std::memcpy(image.data() + item.record.body_rva, body.data(), body.size());
-    }
-    // export directory struct
-    put_at(export_dir_rva + 0x0C, module_name_rva);
-    put_at(export_dir_rva + 0x10, source->export_base); // Base
-    put_at(export_dir_rva + 0x14, static_cast<std::uint32_t>(source->functions.size()));
-    put_at(export_dir_rva + 0x18, static_cast<std::uint32_t>(named_count));
-    put_at(export_dir_rva + 0x1C, eat_rva);
-    put_at(export_dir_rva + 0x20, names_array_rva);
-    put_at(export_dir_rva + 0x24, ordinals_array_rva);
-    put_string(module_name_rva, module_name);
-    // EAT: rebuilt addresses only - forwarders point at the preserved
-    // strings inside this image, holes stay empty, and no entry ever keeps a
-    // source RVA.
-    for (std::size_t index = 0; index < source->functions.size(); ++index) {
-        const auto rva = rva_by_ordinal.find(static_cast<std::uint32_t>(index));
-        if (rva != rva_by_ordinal.end()) {
-            put_at(eat_rva + 4 * static_cast<std::uint32_t>(index), rva->second);
-        }
-    }
-    for (std::size_t i = 0; i < named_count; ++i) {
-        const auto [index, name_index] = source->name_order[i];
-        put_at(names_array_rva + 4 * static_cast<std::uint32_t>(i), name_string_rvas[i]);
-        put_string(name_string_rvas[i], source->functions[index].names[name_index]);
-        const auto at = static_cast<std::size_t>(ordinals_array_rva) + 2 * i;
-        image[at] = static_cast<std::uint8_t>(index);
-        image[at + 1] = static_cast<std::uint8_t>(index >> 8);
-    }
-    for (const auto& item : classified) {
-        if (item.record.forwarded) {
-            put_string(static_cast<std::uint32_t>(item.record.body_rva),
-                       item.record.forwarder_target);
-        }
-    }
-    for (const auto& item : classified) {
-        if (item.record.kind == BoundaryKind::kData) {
-            std::memcpy(image.data() + item.record.body_rva, item.data_bytes.data(),
-                        item.data_bytes.size());
-        }
-    }
-    if (is_ntdll) {
-        // weld .data: zero-initialized engine slots at the fixed RVA
-        image.resize(image.size() + kNtdllWeldDataSize, 0);
     }
 
     DerivedBoundary out;
-    out.image = std::move(image);
-    out.weld_data_rva = is_ntdll ? kBoundaryNtdllWeldDataRva : 0;
+    out.image = std::move(*image);
     out.exports.reserve(classified.size());
     for (auto& item : classified) {
         out.exports.push_back(std::move(item.record));

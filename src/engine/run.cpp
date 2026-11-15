@@ -15,6 +15,7 @@
 #include "../syscalls/syscall_number_map.h"
 #include "../syscalls/syscall_policy.h"
 
+#include <sheller/clock_policy.h>
 #include <sheller/log.h>
 #include <unicorn/unicorn.h>
 
@@ -314,9 +315,10 @@ std::expected<void, SyscallRunFailure> run_tls_callback_legs(PreparedGuest& gues
 
 // Registers the run-scoped unicorn hooks: the diagnostic windows, the
 // syscall/cpuid/rdtsc instruction hooks, the behavior monitored windows,
-// the block/intr/invalid-memory hooks, the per-intercept entry hooks and
-// the C++ accept takeover on ntdll!RtlUnwindEx. The write-prot hook stays
-// with the caller (it needs the caller-owned ledger).
+// the block/intr/invalid-memory hooks, the per-module intercept spans plus
+// the per-row solo hooks and the C++ accept takeover on ntdll!RtlUnwindEx.
+// The write-prot hook stays with the caller (it needs the caller-owned
+// ledger).
 std::expected<void, SyscallRunFailure> register_run_hooks(PreparedGuest& guest,
                                                           const SyscallRunOptions& options,
                                                           SyscallRunState& state,
@@ -324,6 +326,11 @@ std::expected<void, SyscallRunFailure> register_run_hooks(PreparedGuest& guest,
 {
     // Diagnostic per-instruction code window: same gating shape as the
     // per-write window - a range-scoped hook costs nothing outside it.
+    // The three flags below are the SHELLER_HOOK_TRACE inventory of the code
+    // hooks this function registers; they are read once at the end.
+    bool diag_code_registered = false;
+    bool behavior_code_registered = false;
+    bool unwind_registered = false;
     uc_hook diag_code_hook = 0;
     if (options.diag_code_hit && options.diag_code_window_lo != 0 &&
         options.diag_code_window_hi > options.diag_code_window_lo) {
@@ -332,6 +339,7 @@ std::expected<void, SyscallRunFailure> register_run_hooks(PreparedGuest& guest,
                         options.diag_code_window_lo, options.diag_code_window_hi) != UC_ERR_OK) {
             return std::unexpected(SyscallRunFailure{SyscallRunError::kUnicornFailure, {}, {}, {}});
         }
+        diag_code_registered = true;
     }
 
     // Diagnostic per-write window: registered
@@ -408,6 +416,7 @@ std::expected<void, SyscallRunFailure> register_run_hooks(PreparedGuest& guest,
                 return std::unexpected(
                     SyscallRunFailure{SyscallRunError::kUnicornFailure, {}, {}, {}});
             }
+            behavior_code_registered = true;
         }
     }
 
@@ -436,13 +445,32 @@ std::expected<void, SyscallRunFailure> register_run_hooks(PreparedGuest& guest,
     }
 
     // Loader-route API interception: one range-bound code hook per
-    // intercepted entry, all sharing the by-address dispatcher.
-    for (std::size_t i = 0; i < state.intercept_vas.size(); ++i) {
+    // intercept-owning module plus one 1-byte hook per solo row (sentinel
+    // attribution, or a row the selected spans fail to cover exactly once),
+    // all sharing the by-address dispatcher. The apply stage built both lists
+    // under the coverage hard invariant: every intercept row is registered
+    // either through its module's span or as its own hook - a silently
+    // dropped intercept is structurally unreachable. No arch/mode branch and
+    // no module-name or fixed-base special case: the lists are all the
+    // registration site knows.
+    for (const auto& span : state.intercept_spans) {
         uc_hook api_hook = 0;
-        if (uc_hook_add(guest.unicorn.get(), &api_hook, UC_HOOK_CODE,
-                        reinterpret_cast<void*>(on_intercept), &state, state.intercept_vas[i],
-                        state.intercept_vas[i] + 1) != UC_ERR_OK) {
-            return std::unexpected(SyscallRunFailure{SyscallRunError::kUnicornFailure, {}, {}, {}});
+        const uc_err api_error = uc_hook_add(guest.unicorn.get(), &api_hook, UC_HOOK_CODE,
+                                             reinterpret_cast<void*>(on_intercept), &state,
+                                             span.base, span.base + span.size);
+        if (api_error != UC_ERR_OK) {
+            return std::unexpected(SyscallRunFailure{
+                SyscallRunError::kUnicornFailure, static_cast<std::uint32_t>(api_error), {}, {}});
+        }
+    }
+    for (const auto va : state.intercept_solo_vas) {
+        uc_hook api_hook = 0;
+        const uc_err api_error =
+            uc_hook_add(guest.unicorn.get(), &api_hook, UC_HOOK_CODE,
+                        reinterpret_cast<void*>(on_intercept), &state, va, va + 1);
+        if (api_error != UC_ERR_OK) {
+            return std::unexpected(SyscallRunFailure{
+                SyscallRunError::kUnicornFailure, static_cast<std::uint32_t>(api_error), {}, {}});
         }
     }
 
@@ -467,8 +495,20 @@ std::expected<void, SyscallRunFailure> register_run_hooks(PreparedGuest& guest,
                     return std::unexpected(
                         SyscallRunFailure{SyscallRunError::kUnicornFailure, {}, {}, {}});
                 }
+                unwind_registered = true;
             }
         }
+    }
+    // SHELLER_HOOK_TRACE: the code-hook half registered here. The apply stage
+    // printed the trap/stub half; the intercepts count is the intercept table
+    // length N and spans+solo is the hook count this half adds for them, so
+    // with the budget's own count hook the two lines still read as one chain.
+    if (diag::wanted(sheller::log::level::kDebug, diag::hook_on())) {
+        diag::emit(sheller::log::level::kDebug, true,
+                   "[hookinv] code: diag={} behavior={} intercepts={} spans={} solo={} unwind={}",
+                   diag_code_registered ? 1 : 0, behavior_code_registered ? 1 : 0,
+                   state.intercept_vas.size(), state.intercept_spans.size(),
+                   state.intercept_solo_vas.size(), unwind_registered ? 1 : 0);
     }
     return {};
 }
@@ -497,6 +537,12 @@ run_syscalls(PreparedGuest& guest, const SyscallRunOptions& options, const FactC
         }
     }
     SyscallRunState state;
+    // The clock: a container's pinned policy when it carries a clock block,
+    // the engine default otherwise - either way the run's answers are a pure
+    // function of the block count under one fixed policy. The publication
+    // channel is the world's host-backed KUSER page, when the world maps one.
+    state.clock = guest.clock_policy ? *guest.clock_policy : snapshot::default_clock_policy();
+    state.kuser_host_page = guest.kuser_host_page.get();
     // The read-only facts are gathered once, before any write assembly: the
     // PEB-derived cwd, the ntdll number <-> name tables, and the sample
     // module's index/image span feed both the state assembly and the write
@@ -528,6 +574,12 @@ run_syscalls(PreparedGuest& guest, const SyscallRunOptions& options, const FactC
     if (const auto hooks = register_run_hooks(guest, options, state, sample_image_size); !hooks) {
         return std::unexpected(hooks.error());
     }
+    // The clock's first KUSER publication, forced: the container's seed bytes
+    // (the synthetic fixed tick, or the captured world's) must not leak
+    // through the TickCount fields - from here on the memory image reads
+    // back the pure function of `blocks`, starting at tick(blocks = 0)
+    // before any guest code (TLS legs included) executes.
+    publish_kusd_ticks(state, true);
     if (const auto tls = run_tls_callback_legs(guest); !tls) {
         return std::unexpected(tls.error());
     }
@@ -574,13 +626,6 @@ run_syscalls(PreparedGuest& guest, const SyscallRunOptions& options, const FactC
     // host-side at leg boundaries; a leg is at most kLegInstructionCount
     // instructions (~tens of ms), which bounds the timeout granularity.
     constexpr std::uint64_t kLegInstructionCount = 1000000;
-    // Deterministic virtual time: 1 guest ms per 128 executed instructions,
-    // 16384 TSC ticks per instruction. Clock-based delay waits (KUSD
-    // TickCount busy-waits, rdtsc/rdtscp deltas) complete in bounded
-    // emulation time and replays stay host-independent. The rates are
-    // ~24x native-delay compression: a 3s Sleep costs ~0.4M instructions.
-    constexpr std::uint64_t kTscTicksPerInstruction = 16384;
-    constexpr std::uint64_t kInstructionsPerGuestMs = 128;
     std::uint64_t remaining_instructions = options.max_instructions;
     // Scheduler: main thread is tid 0; the scheduler stays a pass-
     // through until a thread creation flips it on.
@@ -600,16 +645,6 @@ run_syscalls(PreparedGuest& guest, const SyscallRunOptions& options, const FactC
             remaining_instructions == 0 ? kLegInstructionCount
                                         : (std::min)(kLegInstructionCount, remaining_instructions);
         const std::uint64_t leg_start_blocks = state.blocks;
-        // Advance the virtual clock and publish it into KUSER_SHARED_DATA
-        // (TickCount fields the loader and delay stubs read) before the leg.
-        state.virtual_instructions += leg_count;
-        state.virtual_tsc = state.virtual_instructions * kTscTicksPerInstruction;
-        state.virtual_ticks =
-            static_cast<std::uint32_t>(state.virtual_instructions / kInstructionsPerGuestMs);
-        const std::uint32_t kusd_ticks = state.virtual_ticks;
-        for (const std::uint64_t kusd_field : {0x7FFE0004ULL, 0x7FFE0320ULL, 0x7FFE0324ULL}) {
-            uc_mem_write(guest.unicorn.get(), kusd_field, &kusd_ticks, sizeof kusd_ticks);
-        }
         run_error = uc_emu_start(guest.unicorn.get(), begin, 0, 0, leg_count);
         // A leg return carries one stop reason: the xfer hook stops before the
         // landing block runs, so no resume or exception flag can be set

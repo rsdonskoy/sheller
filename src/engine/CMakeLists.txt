@@ -5,6 +5,7 @@ target_sources(sheller_engine PRIVATE
   rebuild_state.cpp
   rebuild_state.h
   behavior_fact.h
+  boundary_dispatch.h
   diag_trace.h
   avx_shim.cpp
   avx_shim.h

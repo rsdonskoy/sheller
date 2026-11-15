@@ -2,7 +2,9 @@
 """World diff harness: a mechanical diff of two sheller world snapshots.
 
 Reads one capture snapshot and one crafted container (same snapshot format
-family: v1, or v2 with the trailing pending-module block), aligns the two
+family: v1, v2 with the trailing pending-module block, or v3 with the
+trailing pending and clock-policy blocks - both v3 blocks are skipped, not
+world content), aligns the two
 worlds' modules by name, and renders a deterministic JSON report that
 classifies every difference as expected (layout mechanics: the module set,
 relocations, import binding, KUSD volatile fields) or as a divergence
@@ -16,9 +18,11 @@ src/loader/env.cpp, src/engine/rebuild_state.h):
   - x64 Ldr walk: PEB@TEB+0x60, Ldr@PEB+0x18, chain heads at
     ldr+0x10/0x20/0x30; entry DllBase@+0x30, SizeOfImage@+0x40,
     BaseDllName UNICODE_STRING@+0x58 (Length u16, Buffer u64).
-  - BaseDllName encoding: UTF-16 in real captures, narrow ASCII in the
-    synthetic loader environment; told apart by content and folded to
-    lowercase ASCII, exactly like the engine's fold_module_name.
+  - BaseDllName encoding: UTF-16 in real captures and in the current
+    synthetic loader environment (Length = 2 * characters); containers
+    built before that shared convention stored narrow ASCII (Length =
+    the byte count). The two encodings are told apart by content and
+    folded to lowercase ASCII, exactly like the engine's fold_module_name.
   - PEB/TEB/image base come from the snapshot metadata block.
 
 Pure file processing: the engine, the CLI and the snapshot format are
@@ -29,6 +33,7 @@ import argparse
 import hashlib
 import json
 import sys
+from collections import Counter
 
 KUSD_ADDRESS = 0x7FFE0000
 KUSD_PAGE_BYTES = 0x1000
@@ -83,6 +88,8 @@ REGION_RECORD_SIZE = 25
 PENDING_MARKER = b"PENDMOD1"
 MAX_PENDING_NAME_BYTES = 260
 MAX_PENDING_MODULE_BYTES = 64 * 1024 * 1024
+CLOCK_MARKER = b"CLKPOLICY1"
+CLOCK_PAYLOAD_SIZE = 72  # policy version + length prefix + six u64s + two u32 triples
 
 DOMAIN_ORDER = {"module_set": 0, "module_image": 1, "infrastructure": 2, "pending": 3}
 
@@ -195,7 +202,7 @@ def read_snapshot(path):
     if len(data) < HEADER_SIZE or data[:8] != SNAPSHOT_MAGIC:
         raise SnapshotError("kBadMagic", "not a sheller snapshot")
     version = read_le(data, 8, 4)
-    if version not in (1, 2):
+    if version not in (1, 2, 3):
         raise SnapshotError("kUnsupportedVersion", "version %d" % version)
     bitness = data[12]
     if bitness != 64:
@@ -245,33 +252,77 @@ def read_snapshot(path):
     if version == 2:
         if data[offset:offset + 8] != PENDING_MARKER:
             raise SnapshotError("kBadPending", "v2 file does not carry the pending marker")
-        offset += 8
-        if offset + 4 > len(data):
-            raise SnapshotError("kTruncated", "pending name length cut short")
-        name_len = read_le(data, offset, 4)
-        offset += 4
-        if name_len > MAX_PENDING_NAME_BYTES:
-            raise SnapshotError("kBadPending", "pending name %d bytes over the bound" % name_len)
-        if offset + name_len + 4 > len(data):
-            raise SnapshotError("kTruncated", "pending name cut short")
-        name = data[offset:offset + name_len].decode("utf-8", errors="replace")
-        offset += name_len
-        pending_bitness = data[offset]
-        if pending_bitness != 64:
-            raise SnapshotError("kBadPending", "pending bitness %d" % pending_bitness)
-        offset += 4  # bitness + 3 reserved
-        if offset + 8 > len(data):
-            raise SnapshotError("kTruncated", "pending payload length cut short")
-        payload_len = read_le(data, offset, 8)
-        offset += 8
-        if payload_len > MAX_PENDING_MODULE_BYTES:
-            raise SnapshotError("kBadPending", "pending payload %d bytes over the bound" % payload_len)
-        if offset + payload_len > len(data):
-            raise SnapshotError("kTruncated", "pending payload cut short")
-        pending = {"name": name, "bitness": pending_bitness,
-                   "bytes": data[offset:offset + payload_len]}
+        pending, offset = _parse_pending(data, offset)
+    elif version == 3:
+        # v3: optional pending block, then exactly one clock-policy block.
+        # Neither rides in the world diff - the pending bytes belong to the
+        # DLL route, and the clock policy is engine metadata, not world
+        # content - but both are fully validated and the file must end at
+        # the clock block: named refusals mirror the engine reader, never a
+        # silent tail.
+        if data[offset:offset + 1] == PENDING_MARKER[:1]:
+            pending, offset = _parse_pending(data, offset)
+        if offset + 10 > len(data):
+            raise SnapshotError("kTruncated", "clock block cut short")
+        if data[offset:offset + 10] != CLOCK_MARKER:
+            raise SnapshotError("kBadClock", "v3 file does not carry the clock marker")
+        if offset + 10 + 8 > len(data):
+            raise SnapshotError("kTruncated", "clock header cut short")
+        policy_version = read_le(data, offset + 10, 4)
+        payload_len = read_le(data, offset + 10 + 4, 4)
+        if policy_version != 1 or payload_len != CLOCK_PAYLOAD_SIZE:
+            raise SnapshotError("kBadClock", "clock policy version %d, payload %d bytes"
+                                % (policy_version, payload_len))
+        payload_at = offset + 10 + 8
+        if payload_at + CLOCK_PAYLOAD_SIZE > len(data):
+            raise SnapshotError("kTruncated", "clock payload cut short")
+        blocks_per_tick = read_le(data, payload_at + 16, 8)
+        qpc_frequency = read_le(data, payload_at + 24, 8)
+        if blocks_per_tick == 0 or qpc_frequency == 0:
+            raise SnapshotError("kBadClock", "engine-unsafe clock policy "
+                                "(blocks_per_tick=%d, qpc_frequency=%d)"
+                                % (blocks_per_tick, qpc_frequency))
+        offset = payload_at + CLOCK_PAYLOAD_SIZE
+
+    if version >= 2 and offset != len(data):
+        raise SnapshotError("kBadPending" if version == 2 else "kBadClock",
+                            "trailing bytes after the last block")
 
     return World(version, regions, registers, metadata, pending)
+
+
+def _parse_pending(data, offset):
+    """Parse one pending-module block at offset; return (pending, next offset)."""
+    if offset + 8 > len(data):
+        raise SnapshotError("kTruncated", "pending marker cut short")
+    if data[offset:offset + 8] != PENDING_MARKER:
+        raise SnapshotError("kBadPending", "pending marker is invalid")
+    offset += 8
+    if offset + 4 > len(data):
+        raise SnapshotError("kTruncated", "pending name length cut short")
+    name_len = read_le(data, offset, 4)
+    offset += 4
+    if name_len == 0 or name_len > MAX_PENDING_NAME_BYTES:
+        raise SnapshotError("kBadPending", "pending name length %d is invalid" % name_len)
+    if offset + name_len + 4 > len(data):
+        raise SnapshotError("kTruncated", "pending name cut short")
+    name = data[offset:offset + name_len].decode("utf-8", errors="replace")
+    offset += name_len
+    pending_bitness = data[offset]
+    if pending_bitness != 64:
+        raise SnapshotError("kBadPending", "pending bitness %d" % pending_bitness)
+    offset += 4  # bitness + 3 reserved
+    if offset + 8 > len(data):
+        raise SnapshotError("kTruncated", "pending payload length cut short")
+    payload_len = read_le(data, offset, 8)
+    offset += 8
+    if payload_len == 0 or payload_len > MAX_PENDING_MODULE_BYTES:
+        raise SnapshotError("kBadPending", "pending payload length %d is invalid" % payload_len)
+    if offset + payload_len > len(data):
+        raise SnapshotError("kTruncated", "pending payload cut short")
+    pending = {"name": name, "bitness": pending_bitness,
+               "bytes": data[offset:offset + payload_len]}
+    return pending, offset + payload_len
 
 
 # ---------------------------------------------------------------------------
@@ -280,8 +331,13 @@ def read_snapshot(path):
 
 
 def fold_module_name(world, address, length_bytes):
-    """Mirror of the engine's fold_module_name: narrow-ASCII vs UTF-16 told
-    apart by content, folded to lowercase ASCII, '?' for non-ASCII."""
+    """Mirror of the engine's fold_module_name. Current containers store Ldr
+    names as UTF-16 (Length = 2 * characters); containers built before the
+    shared-convention change stored narrow ASCII bytes (Length = the byte
+    count). The two encodings are told apart by content - UTF-16 ASCII text
+    carries a zero high byte on every other byte, the narrow text never does -
+    so the legacy containers' names stay readable. Folded to lowercase ASCII,
+    '?' for non-ASCII."""
     read_count = min(length_bytes, MODULE_NAME_BYTES)
     if read_count == 0:
         return ""
@@ -369,12 +425,17 @@ def enumerate_ldr(world):
 
 
 class PeImage:
-    def __init__(self, image_base, size_of_image, sections, reloc_qwords, iat_slots):
+    def __init__(self, image_base, size_of_image, sections, reloc_qwords, iat_slots,
+                 delay_iat_slots=None):
         self.image_base = image_base
         self.size_of_image = size_of_image
         self.sections = sections  # [{name, rva, vsize}]
         self.reloc_qwords = reloc_qwords  # {rva} covered by DIR64 entries
         self.iat_slots = iat_slots  # {rva: bound value}
+        # DataDirectory[13] ImgDelayDescr pIAT coverage: {rva: bound value,
+        # name} - the identity the descriptor references (None when the
+        # descriptor's name is not readable or the descriptor is VA-form).
+        self.delay_iat_slots = delay_iat_slots or {}
 
 
 def parse_pe(image):
@@ -452,7 +513,40 @@ def parse_pe(image):
                             break
                         iat_slots[slot_rva] = {"bound": bound, "name": import_name}
                 at += 20
-        return PeImage(image_base, size_of_image, sections, reloc_qwords, iat_slots)
+
+        # DataDirectory[13]: the delay-load directory. RVA-form descriptors
+        # name the referenced module directly; a VA-form descriptor or an
+        # unreadable name keeps the slots identity-less (None) - the
+        # classification records cause-uncertain, never a span guess.
+        delay_iat_slots = {}
+        delay_rva, _ = directory(13)
+        if delay_rva:
+            at = delay_rva
+            for _ in range(4096):  # bounded: delay descriptors are finite
+                if at + 32 > len(image):
+                    break
+                gr = read_le(image, at, 4)
+                name_f = read_le(image, at + 4, 4)
+                piat = read_le(image, at + 12, 4)
+                pint = read_le(image, at + 16, 4)
+                if (gr == 0 and name_f == 0 and piat == 0 and pint == 0
+                        and read_le(image, at + 28, 4) == 0):
+                    break
+                import_name = None
+                if gr & 1 and name_f and name_f < len(image):
+                    import_name = read_cstring(image, name_f)
+                if gr & 1 and piat and piat < len(image):
+                    for i in range(8192):
+                        slot_rva = piat + 8 * i
+                        if slot_rva + 8 > len(image):
+                            break
+                        bound = read_le(image, slot_rva, 8)
+                        if bound == 0:
+                            break
+                        delay_iat_slots[slot_rva] = {"bound": bound, "name": import_name}
+                at += 32
+        return PeImage(image_base, size_of_image, sections, reloc_qwords, iat_slots,
+                       delay_iat_slots)
     except Unreadable:
         return None
 
@@ -663,6 +757,12 @@ class Diff:
                 })
                 continue
             end_a, end_b = sa["rva"] + sa["vsize"], sb["rva"] + sb["vsize"]
+            if sa["rva"] != sb["rva"]:
+                self.entries.append({
+                    "domain": "module_image", "classification": CLASS_CANDIDATE,
+                    "module": a["name"], "section": name,
+                    "note": "section RVA differs",
+                })
             if max(end_a, end_b) > min(len(image_a), len(image_b)):
                 self.entries.append({
                     "domain": "module_image", "classification": CLASS_CANDIDATE,
@@ -692,7 +792,7 @@ class Diff:
             pointer_offsets = {
                 rva - section["rva"]
                 for pe, section in ((pe_a, sa), (pe_b, sb))
-                for rva in pe.reloc_qwords | set(pe.iat_slots)
+                for rva in pe.reloc_qwords | set(pe.iat_slots) | set(pe.delay_iat_slots)
                 if 0 <= rva - section["rva"] <= common - 8
             }
             for offset in sorted(pointer_offsets):
@@ -736,6 +836,7 @@ class Diff:
                     "crafted_addr": hexaddr(b["base"] + sb["rva"] + first_start),
                     "capture_sha256": sha256_hex(bytes_a),
                     "crafted_sha256": sha256_hex(bytes_b),
+                    "diff_ranges": [[sa["rva"] + s, sa["rva"] + e] for s, e in windows],
                     "_ranges": {
                         "capture": merge_ranges([(a["base"] + sa["rva"] + s,
                                                   a["base"] + sa["rva"] + e)
@@ -755,6 +856,16 @@ class Diff:
         """Returns (classification, optional note)."""
         if rva_b is None:
             rva_b = rva_a
+        # Delayed-import slots verify by referenced identity FIRST (the
+        # classification-priority revision): a delay slot the relocation
+        # table also covers is an import-identity question, never a reloc
+        # delta - the eager bound slots ride the reloc table on both worlds,
+        # and their binding is what the equivalence question is about.
+        delay_a = pe_a.delay_iat_slots.get(rva_a)
+        delay_b = pe_b.delay_iat_slots.get(rva_b)
+        if delay_a is not None or delay_b is not None:
+            return Diff._classify_import_identity(delay_a, delay_b, value_a, value_b,
+                                                  modules_a, modules_b)
         reloc_covered = rva_a in pe_a.reloc_qwords or rva_b in pe_b.reloc_qwords
         if reloc_covered:
             delta = (value_a - value_b) % (1 << 64)
@@ -764,34 +875,42 @@ class Diff:
         slot_a = pe_a.iat_slots.get(rva_a)
         slot_b = pe_b.iat_slots.get(rva_b)
         if slot_a is not None or slot_b is not None:
-            if slot_a is None or slot_b is None:
-                return CLASS_CAUSE_UNCERTAIN, "import slot missing on one side"
-            identity_a, identity_b = slot_a["name"], slot_b["name"]
-            if not identity_a or not identity_b:
-                # the slot is an import but its referenced module is not even
-                # nameable: insufficient evidence, never "expected"
-                return CLASS_CAUSE_UNCERTAIN, "import slot identity unreadable"
-            if identity_a.lower().removesuffix(".dll") != identity_b.lower().removesuffix(".dll"):
-                return CLASS_CANDIDATE_IMPORT_ANOMALY, "import identities differ"
-            ref_a = module_by_name(modules_a, identity_a)
-            ref_b = module_by_name(modules_b, identity_b)
-            if ref_a is not None and ref_b is not None:
-                ok = (ref_a["base"] <= value_a < ref_a["base"] + ref_a["size"]
-                      and ref_b["base"] <= value_b < ref_b["base"] + ref_b["size"])
-                return ((CLASS_EXPECTED_IMPORT, None) if ok
-                        else (CLASS_CANDIDATE_IMPORT_ANOMALY, None))
-            if ref_a is None and ref_b is None:
-                # unresolved on both sides (api-set contract or a forwarder):
-                # the binding must terminate in the same module on both worlds
-                term_a = terminal_module(modules_a, value_a)
-                term_b = terminal_module(modules_b, value_b)
-                ok = (term_a is not None and term_b is not None
-                      and term_a["name"] == term_b["name"])
-                return ((CLASS_EXPECTED_IMPORT, "import name unresolved; terminal target match")
-                        if ok else (CLASS_CANDIDATE_IMPORT_ANOMALY, None))
-            # the referenced module exists on one side only: its set differs
-            return CLASS_CANDIDATE_IMPORT_ANOMALY, None
+            return Diff._classify_import_identity(slot_a, slot_b, value_a, value_b,
+                                                  modules_a, modules_b)
         return CLASS_CANDIDATE, None
+
+    @staticmethod
+    def _classify_import_identity(slot_a, slot_b, value_a, value_b, modules_a, modules_b):
+        """One import slot (normal or delayed) classified by its referenced
+        identity: both sides must name the same module and the values must
+        terminate there - never an any-span-membership verdict."""
+        if slot_a is None or slot_b is None:
+            return CLASS_CAUSE_UNCERTAIN, "import slot missing on one side"
+        identity_a, identity_b = slot_a["name"], slot_b["name"]
+        if not identity_a or not identity_b:
+            # the slot is an import but its referenced module is not even
+            # nameable: insufficient evidence, never "expected"
+            return CLASS_CAUSE_UNCERTAIN, "import slot identity unreadable"
+        if identity_a.lower().removesuffix(".dll") != identity_b.lower().removesuffix(".dll"):
+            return CLASS_CANDIDATE_IMPORT_ANOMALY, "import identities differ"
+        ref_a = module_by_name(modules_a, identity_a)
+        ref_b = module_by_name(modules_b, identity_b)
+        if ref_a is not None and ref_b is not None:
+            ok = (ref_a["base"] <= value_a < ref_a["base"] + ref_a["size"]
+                  and ref_b["base"] <= value_b < ref_b["base"] + ref_b["size"])
+            return ((CLASS_EXPECTED_IMPORT, None) if ok
+                    else (CLASS_CANDIDATE_IMPORT_ANOMALY, None))
+        if ref_a is None and ref_b is None:
+            # unresolved on both sides (api-set contract or a forwarder):
+            # the binding must terminate in the same module on both worlds
+            term_a = terminal_module(modules_a, value_a)
+            term_b = terminal_module(modules_b, value_b)
+            ok = (term_a is not None and term_b is not None
+                  and term_a["name"] == term_b["name"])
+            return ((CLASS_EXPECTED_IMPORT, "import name unresolved; terminal target match")
+                    if ok else (CLASS_CANDIDATE_IMPORT_ANOMALY, None))
+        # the referenced module exists on one side only: its set differs
+        return CLASS_CANDIDATE_IMPORT_ANOMALY, None
 
     # -- infrastructure domain --------------------------------------------
 
@@ -919,18 +1038,43 @@ class Diff:
         for chain in LDR_CHAIN_NAMES:
             names_a = [e["name"] for e in self.chains["capture"][chain]]
             names_b = [e["name"] for e in self.chains["crafted"][chain]]
-            if len(names_a) != len(names_b):
-                self.entries.append({
-                    "domain": "infrastructure", "classification": CLASS_CANDIDATE,
-                    "target": "ldr.%s" % chain,
-                    "detail": "count capture=%d crafted=%d" % (len(names_a), len(names_b)),
-                })
-            for i, (na, nb) in enumerate(zip(names_a, names_b)):
+            # membership first: a member whose chain multiplicity differs is a
+            # membership difference. A member present on one side only echoes
+            # the module-set expected entry (the two worlds' environments
+            # differ by design); a count difference on a COMMON member (the
+            # same name bound twice) is an order/count defect - a candidate.
+            counts_a = Counter(names_a)
+            counts_b = Counter(names_b)
+            for name in sorted(set(counts_a) | set(counts_b)):
+                ca, cb = counts_a.get(name, 0), counts_b.get(name, 0)
+                if ca == cb:
+                    continue
+                if max(ca, cb) == 1 and min(ca, cb) == 0:
+                    self.entries.append({
+                        "domain": "infrastructure", "classification": CLASS_EXPECTED,
+                        "target": "ldr.%s" % chain,
+                        "detail": "membership: %s present on %s only"
+                                  % (name, "capture" if ca else "crafted"),
+                    })
+                else:
+                    self.entries.append({
+                        "domain": "infrastructure", "classification": CLASS_CANDIDATE,
+                        "target": "ldr.%s" % chain,
+                        "detail": "count differs for %s: capture=%d crafted=%d"
+                                  % (name, ca, cb),
+                    })
+            # order: the COMMON members must appear in the same relative
+            # order - the loader's actual ordering contract
+            set_b = set(names_b)
+            common_a = [n for n in names_a if n in set_b]
+            set_a = set(names_a)
+            common_b = [n for n in names_b if n in set_a]
+            for i, (na, nb) in enumerate(zip(common_a, common_b)):
                 if na != nb:
                     self.entries.append({
                         "domain": "infrastructure", "classification": CLASS_CANDIDATE,
                         "target": "ldr.%s" % chain,
-                        "detail": "order differs at index %d: capture=%s crafted=%s"
+                        "detail": "order differs at common index %d: capture=%s crafted=%s"
                                   % (i, na, nb),
                     })
                     break
@@ -1048,6 +1192,29 @@ def sort_key(entry):
             int(offset, 16) if offset else 0)
 
 
+def pe_build_id(world, module):
+    """Digest the source PE/COFF + optional header and complete section table.
+
+    Includes the linker build timestamp/checksum; excludes the DOS reserved
+    marker used by directory mode. Runtime relocation/binding leaves it intact.
+    """
+    try:
+        base = module["base"]
+        pe = world.read_u32(base + 0x3C)
+        header = world.read(base + pe, 24)
+        if header[:4] != b"PE\0\0":
+            return None
+        end = 24 + read_le(header, 20, 2) + 40 * read_le(header, 6, 2)
+        if pe + end > module["size"]:
+            return None
+        contents = bytearray(world.read(base + pe, end))
+        # The real loader writes the mapped base into OptionalHeader.ImageBase.
+        contents[48:56] = bytes(8)
+        return sha256_hex(contents)
+    except Unreadable:
+        return None
+
+
 def render_report(diff, interest):
     report = {
         "format": "world-diff/1",
@@ -1075,6 +1242,8 @@ def render_report(diff, interest):
                     "name": a["name"],
                     "capture_base": hexaddr(a["base"]), "crafted_base": hexaddr(b["base"]),
                     "capture_size": a["size"], "crafted_size": b["size"],
+                    "capture_build_id": pe_build_id(diff.capture, a),
+                    "crafted_build_id": pe_build_id(diff.crafted, b),
                 }
                 for a, b in diff.aligned
             ],

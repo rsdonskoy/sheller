@@ -274,7 +274,7 @@ struct AnalysisFailure {
                      // entry got non-snapshot bytes, or a forced routing
                      // contradicted the input)
         kSnapshotIo, // a snapshot file could not be read, or the bytes did
-                     // not validate as a v1 snapshot
+                     // not validate as a snapshot container
         kRun,        // execution (or post-run artifact production) failed
     };
     Kind kind{};

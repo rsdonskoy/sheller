@@ -22,6 +22,30 @@ constexpr std::size_t kGateTestLength = 2;         // opcode + imm8
 constexpr std::size_t kGateTestWindow = 32;        // load->test gap in bytes
 constexpr std::size_t kGateScanWindow = 512;       // prologue bytes inspected per export
 
+// The QPC face of the virtual clock: the counter is the policy's base plus
+// the per-block delta at the current block position, the frequency the
+// policy's pinned value - both pure functions of the block count. Fail-soft
+// like the retired zero answer: an unwritable counter pointer rejects the
+// call, a null counter pointer keeps the default success (frequency-only
+// callers still get their frequency).
+void apply_query_performance_counter(SyscallRunState* state, uc_engine* const uc,
+                                     syscalls::SyscallOutcome& outcome)
+{
+    if (outcome.qpc_counter_ptr != 0) {
+        const std::uint64_t counter =
+            state->clock.base_qpc + state->clock.qpc_per_block * state->blocks;
+        if (uc_mem_write(uc, outcome.qpc_counter_ptr, &counter, sizeof counter) != UC_ERR_OK) {
+            outcome.status = syscalls::kStatusAccessViolation;
+            return;
+        }
+    }
+    if (outcome.qpc_frequency_ptr != 0) {
+        const std::uint64_t frequency = state->clock.qpc_frequency;
+        static_cast<void>(
+            uc_mem_write(uc, outcome.qpc_frequency_ptr, &frequency, sizeof frequency));
+    }
+}
+
 } // namespace
 
 // Shared syscall dispatch: event, policy answer, allocation/protect side
@@ -32,6 +56,9 @@ syscalls::SyscallOutcome dispatch_one_syscall(SyscallRunState* state, uc_engine*
 {
     const syscalls::WriteSink sink{&state->sink, &sink_trampoline};
     auto outcome = syscalls::dispatch_syscall(state->policy, uc, frame, sink);
+    if (outcome.query_performance) {
+        apply_query_performance_counter(state, uc, outcome);
+    }
     if (outcome.open_section) {
         apply_open_section(*state, uc, frame, outcome);
     }

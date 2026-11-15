@@ -310,22 +310,16 @@ SyscallOutcome dispatch_syscall(const PolicyTable& table, uc_engine* uc, const S
         }
         break;
     }
-    case BuiltinHandler::kQueryPerformanceCounter: {
+    case BuiltinHandler::kQueryPerformanceCounter:
         // NtQueryPerformanceCounter(PLARGE_INTEGER Counter=rcx,
-        // PLARGE_INTEGER Frequency=rdx optional): deterministic zeros - the
-        // replay's clock never advances. Fail-soft: an unwritable out
-        // pointer keeps the default success for the counter only when the
-        // primary write lands.
-        static const std::uint64_t kZero = 0;
-        if (frame.rcx != 0 && uc_mem_write(uc, frame.rcx, &kZero, sizeof kZero) != UC_ERR_OK) {
-            outcome.status = kStatusAccessViolation;
-            break;
-        }
-        if (frame.rdx != 0) {
-            static_cast<void>(uc_mem_write(uc, frame.rdx, &kZero, sizeof kZero));
-        }
+        // PLARGE_INTEGER Frequency=rdx optional): parse only - the engine
+        // answers the counter from the virtual clock and the frequency from
+        // the clock policy (a nonzero container-pinned value), keeping the
+        // whole QPC face a pure function of the block count.
+        outcome.query_performance = true;
+        outcome.qpc_counter_ptr = frame.rcx;
+        outcome.qpc_frequency_ptr = frame.rdx;
         break;
-    }
     case BuiltinHandler::kMapViewOfSection:
         // NtMapViewOfSection(Handle=rcx, Process=rdx, *BaseAddress=r8,
         // *ZeroBits=r9, CommitSize=[rsp+0x28], *SectionOffset=[rsp+0x30],

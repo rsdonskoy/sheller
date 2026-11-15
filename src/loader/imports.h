@@ -124,7 +124,29 @@ resolve_imports(std::span<std::uint8_t> image, const std::vector<LoadedModule>& 
 std::expected<std::vector<ImportFixup>, LoadError>
 resolve_imports(std::span<std::uint8_t> image, const std::vector<LoadedModule>& modules,
                 std::vector<UnresolvedImport>* unresolved, const ApiSetContext& ctx,
-                std::string_view importer_name);
+                std::string_view importer_name, bool write = true);
+
+// The directory mode's eager delayed-import binding (the construction-time
+// policy over the delay-load directory, DataDirectory[13]): every
+// RVA-addressed ImgDelayDescr's IAT slots that RESOLVE against the resident
+// set take the final VAs; every resolution miss - the bound DLL absent, the
+// map not covering the contract, the host missing the export - is
+// tolerated with the slot keeping its construction-input bytes, because
+// MSVC statically initializes failed-delay IAT entries to the module's own
+// helper thunks and the real loader leaves them there (the capture
+// corpus's slots match the file bytes + relocation delta slot-for-slot).
+// That is the whole write set - the descriptor timestamps, module-handle
+// slots, bound-IAT copies and unload tables also stay at their file bytes
+// (the capture's records: zero/untouched with the IAT bound). `unresolved`
+// is never filled; only a malformed descriptor (VA-addressed legacy form,
+// fields out of range) is the named rejection via the returned error.
+// `write=false` walks and reports without touching the image (the closure
+// pass), `write=true` writes back (the binding pass). No delay directory
+// is a clean no-op.
+std::expected<std::vector<ImportFixup>, LoadError>
+bind_delayed_imports(std::span<std::uint8_t> image, const std::vector<LoadedModule>& modules,
+                     std::vector<UnresolvedImport>* unresolved, const ApiSetContext& ctx,
+                     std::string_view importer_name, bool write);
 
 } // namespace sheller::loader
 

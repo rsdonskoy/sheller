@@ -6,6 +6,7 @@
 #include <sheller/snapshot.h>
 
 #include <sheller/byte_order.h>
+#include <sheller/clock_policy.h>
 
 #include <algorithm>
 #include <cstring>
@@ -33,6 +34,8 @@ std::string_view error_message(const Error error)
         return "region content flag is invalid";
     case Error::kBadPending:
         return "pending-module block is invalid or out of place";
+    case Error::kBadClock:
+        return "clock-policy block is invalid, out of place, or repeated";
     }
     return "unknown snapshot error";
 }
@@ -132,7 +135,9 @@ std::expected<void, Error> Writer::finalize_region_count()
 
 std::expected<void, Error> Writer::write_pending(const PendingModule& pending)
 {
-    if (header_version_ != kVersionV2) {
+    // v2 (the pending-only DLL container) and v3 (pending + clock block) are
+    // both legal carriers; v1 keeps its exact legacy layout.
+    if (header_version_ != kVersionV2 && header_version_ != kVersionV3) {
         return std::unexpected(Error::kBadPending);
     }
     if (pending.name.empty() || pending.name.size() > kMaxPendingNameBytes ||
@@ -155,6 +160,39 @@ std::expected<void, Error> Writer::write_pending(const PendingModule& pending)
             return write_bytes(tail.data(), tail.size());
         })
         .and_then([&] { return write_bytes(pending.bytes.data(), pending.bytes.size()); });
+}
+
+std::expected<void, Error> Writer::write_clock(const ClockPolicy& clock)
+{
+    if (header_version_ != kVersionV3 || clock_written_) {
+        return std::unexpected(Error::kBadClock);
+    }
+    // The engine divides by blocks_per_tick in the TickCount publish and
+    // publishes qpc_frequency verbatim: a policy without them is not a
+    // clock, and the writer refuses it here rather than letting a corrupt
+    // replay divide by zero later.
+    if (clock.policy_version != kClockPolicyVersion || clock.blocks_per_tick == 0 ||
+        clock.qpc_frequency == 0) {
+        return std::unexpected(Error::kBadClock);
+    }
+    std::array<std::uint8_t, kClockBlockSize> block{};
+    std::ranges::copy(kClockMarker, block.begin());
+    le::store_le32(block.data() + kClockVersionOffset, clock.policy_version);
+    le::store_le32(block.data() + kClockPayloadLenOffset, kClockPayloadSize);
+    le::store_le64(block.data() + kClockBaseTscOffset, clock.base_tsc);
+    le::store_le64(block.data() + kClockTscPerBlockOffset, clock.tsc_per_block);
+    le::store_le64(block.data() + kClockBlocksPerTickOffset, clock.blocks_per_tick);
+    le::store_le64(block.data() + kClockQpcFrequencyOffset, clock.qpc_frequency);
+    le::store_le64(block.data() + kClockBaseQpcOffset, clock.base_qpc);
+    le::store_le64(block.data() + kClockQpcPerBlockOffset, clock.qpc_per_block);
+    for (std::size_t i = 0; i < 3; ++i) {
+        le::store_le32(block.data() + kClockCpuid0x15Offset + i * sizeof(std::uint32_t),
+                       clock.cpuid_0x15[i]);
+        le::store_le32(block.data() + kClockCpuid0x16Offset + i * sizeof(std::uint32_t),
+                       clock.cpuid_0x16[i]);
+    }
+    clock_written_ = true;
+    return write_bytes(block.data(), block.size());
 }
 
 Reader::Reader(std::istream& in) : in_(in)
@@ -187,7 +225,8 @@ std::expected<Header, Error> Reader::read_header()
         .bitness = block[kBitnessOffset],
         .region_count = le::load_le32(block.data() + kRegionCountOffset),
     };
-    if (header.version != kVersion && header.version != kVersionV2) {
+    if (header.version != kVersion && header.version != kVersionV2 &&
+        header.version != kVersionV3) {
         return std::unexpected(Error::kUnsupportedVersion);
     }
     if (header.bitness != kBitness64 && header.bitness != kBitness32) {
@@ -259,9 +298,53 @@ std::expected<Region, Error> Reader::read_region()
 
 std::expected<PendingModule, Error> Reader::read_pending()
 {
-    if (header_version != kVersionV2 || pending_read_) {
+    if ((header_version != kVersionV2 && header_version != kVersionV3) || pending_read_) {
         return std::unexpected(Error::kBadPending);
     }
+    // Peek the first marker byte before consuming anything: "no pending
+    // block" (a v3 EXE container, or a v1/v2 file) fails this check
+    // non-destructively, so the caller's clock read starts at the right
+    // offset. A first byte that opens a pending-like block is read fully;
+    // a full-marker mismatch there means a corrupt container, and whatever
+    // the caller reads next fails on its own marker.
+    const int first = in_.peek();
+    if (first == std::char_traits<char>::eof()) {
+        return std::unexpected(Error::kTruncated);
+    }
+    if (static_cast<std::uint8_t>(first) != kPendingMarker[0]) {
+        return std::unexpected(Error::kBadPending);
+    }
+    return parse_pending_block();
+}
+
+std::expected<std::optional<PendingModule>, Error> Reader::read_pending_optional()
+{
+    if ((header_version != kVersionV2 && header_version != kVersionV3) || pending_read_) {
+        return std::unexpected(Error::kBadPending);
+    }
+    // Absence is decided by the first marker byte alone (the only two legal
+    // trailing markers open with different bytes): anything not opening a
+    // pending-like block means the pending block is absent and the stream
+    // stays untouched for the clock read. A pending-like first byte commits
+    // to the full strict parse - a block that starts like pending and then
+    // fails its bounds is a corrupt container, not an absent one, so every
+    // parse error is a named rejection.
+    const int first = in_.peek();
+    if (first == std::char_traits<char>::eof()) {
+        return std::unexpected(Error::kTruncated);
+    }
+    if (static_cast<std::uint8_t>(first) != kPendingMarker[0]) {
+        return std::nullopt;
+    }
+    auto pending = parse_pending_block();
+    if (!pending) {
+        return std::unexpected(pending.error());
+    }
+    return std::optional(std::move(*pending));
+}
+
+std::expected<PendingModule, Error> Reader::parse_pending_block()
+{
     std::array<std::uint8_t, sizeof kPendingMarker> marker{};
     if (const Error error = read_bytes(marker.data(), marker.size()); error != Error::kNone) {
         return std::unexpected(error);
@@ -303,6 +386,58 @@ std::expected<PendingModule, Error> Reader::read_pending()
     }
     pending_read_ = true;
     return pending;
+}
+
+std::expected<ClockPolicy, Error> Reader::read_clock()
+{
+    if (header_version != kVersionV3 || clock_read_) {
+        return std::unexpected(Error::kBadClock);
+    }
+    std::array<std::uint8_t, sizeof kClockMarker> marker{};
+    if (const Error error = read_bytes(marker.data(), marker.size()); error != Error::kNone) {
+        return std::unexpected(error);
+    }
+    if (std::memcmp(marker.data(), kClockMarker, sizeof kClockMarker) != 0) {
+        return std::unexpected(Error::kBadClock);
+    }
+    std::array<std::uint8_t, kClockBaseTscOffset - kClockVersionOffset> head{};
+    if (const Error error = read_bytes(head.data(), head.size()); error != Error::kNone) {
+        return std::unexpected(error);
+    }
+    ClockPolicy clock;
+    clock.policy_version = le::load_le32(head.data());
+    const auto payload_len = le::load_le32(head.data() + sizeof(std::uint32_t));
+    if (clock.policy_version != kClockPolicyVersion || payload_len != kClockPayloadSize) {
+        // An unknown policy version, or a payload length that does not match
+        // the known field layout - both mean this reader would guess at
+        // shifted fields, so the block is refused instead.
+        return std::unexpected(Error::kBadClock);
+    }
+    std::array<std::uint8_t, kClockPayloadSize> payload{};
+    if (const Error error = read_bytes(payload.data(), payload.size()); error != Error::kNone) {
+        return std::unexpected(error);
+    }
+    clock.base_tsc = le::load_le64(payload.data() + kClockBaseTscOffset - kClockBaseTscOffset);
+    clock.tsc_per_block =
+        le::load_le64(payload.data() + kClockTscPerBlockOffset - kClockBaseTscOffset);
+    clock.blocks_per_tick =
+        le::load_le64(payload.data() + kClockBlocksPerTickOffset - kClockBaseTscOffset);
+    clock.qpc_frequency =
+        le::load_le64(payload.data() + kClockQpcFrequencyOffset - kClockBaseTscOffset);
+    clock.base_qpc = le::load_le64(payload.data() + kClockBaseQpcOffset - kClockBaseTscOffset);
+    clock.qpc_per_block =
+        le::load_le64(payload.data() + kClockQpcPerBlockOffset - kClockBaseTscOffset);
+    for (std::size_t i = 0; i < 3; ++i) {
+        clock.cpuid_0x15[i] = le::load_le32(payload.data() + kClockCpuid0x15Offset -
+                                            kClockBaseTscOffset + i * sizeof(std::uint32_t));
+        clock.cpuid_0x16[i] = le::load_le32(payload.data() + kClockCpuid0x16Offset -
+                                            kClockBaseTscOffset + i * sizeof(std::uint32_t));
+    }
+    if (clock.blocks_per_tick == 0 || clock.qpc_frequency == 0) {
+        return std::unexpected(Error::kBadClock);
+    }
+    clock_read_ = true;
+    return clock;
 }
 
 } // namespace sheller::snapshot

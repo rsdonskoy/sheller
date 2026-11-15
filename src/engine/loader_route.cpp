@@ -249,7 +249,8 @@ load_real_module(const std::vector<std::uint8_t>& bytes, const std::string_view 
 // read.
 std::expected<LoadedSystemModules, RebuildFailure> load_directory_system_modules(
     const GuestMode mode, const std::filesystem::path& dir, const bool fallback_enabled,
-    const std::filesystem::path& synthetic_module_dir, std::vector<std::uint8_t>& image)
+    const std::filesystem::path& synthetic_module_dir, std::vector<std::uint8_t>& image,
+    const std::span<const std::uint8_t> closure_root, const std::string_view closure_root_name)
 {
     // The derivation covers the x64 boundary pair only (no x86 images here).
     if (mode != GuestMode::kX64) {
@@ -298,6 +299,21 @@ std::expected<LoadedSystemModules, RebuildFailure> load_directory_system_modules
     loaded.apiset_anchor = ntdll_hash;
     loaded.api_set_map = std::move(*map_view);
 
+    std::vector<std::uint8_t> root_image;
+    if (!closure_root.empty()) {
+        const auto info = loader::parse_pe(closure_root);
+        if (!info) {
+            return std::unexpected(
+                failure(RebuildError::kBadSnapshot, "closure root PE malformed"));
+        }
+        auto built = loader::build_image(closure_root, *info);
+        if (!built) {
+            return std::unexpected(
+                failure(RebuildError::kBadSnapshot, "closure root image malformed"));
+        }
+        root_image = std::move(*built);
+    }
+
     // The boundary pair: ntdll derives at its reserved base, win32u derives
     // only when the directory carries it (a referenced-but-absent win32u is
     // the binding stage's named rejection, not a load failure).
@@ -322,7 +338,7 @@ std::expected<LoadedSystemModules, RebuildFailure> load_directory_system_modules
                         std::format("{}: boundary manifest rejected: {}", module_name,
                                     boundary_manifest_error_message(rules.error()))));
         }
-        auto derived = loader::derive_boundary_image(*bytes, module_name, *rules);
+        auto derived = loader::derive_boundary_image(*bytes, module_name, *rules, base);
         if (!derived.has_value()) {
             return std::unexpected(failure(RebuildError::kBadSnapshot,
                                            std::format("{}: boundary derivation rejected: {}",
@@ -330,26 +346,13 @@ std::expected<LoadedSystemModules, RebuildFailure> load_directory_system_modules
         }
         loader::LoadedModule module;
         module.base = base;
-        // the derived bytes are a PE file; the guest map takes the folded
-        // SizeOfImage image every other module path builds (page-aligned)
-        auto derived_info = loader::parse_pe(derived->image);
-        if (!derived_info.has_value()) {
-            return std::unexpected(
-                failure(RebuildError::kBadSnapshot,
-                        std::format("{}: derived image does not parse: {}", module_name,
-                                    loader::load_error_message(derived_info.error()))));
-        }
-        auto guest_image = loader::build_image(derived->image, *derived_info);
-        if (!guest_image.has_value()) {
-            return std::unexpected(
-                failure(RebuildError::kBadSnapshot,
-                        std::format("{}: derived image build failed: {}", module_name,
-                                    loader::load_error_message(guest_image.error()))));
-        }
-        module.image = std::move(*guest_image);
+        // the derivation already folded the real file, relocated it to the
+        // module's base and written the whitelist slots: the bytes are the
+        // guest map, same shape as every real-byte module
+        module.image = std::move(derived->image);
         // the derived ntdll carries the independent mode marker in its
-        // reserved DOS e_res2 slot - part of the generated
-        // image contract, written before any map bytes exist
+        // reserved DOS e_res2 slot - the derive verified the slot zero, the
+        // marker write lands before any map bytes exist
         if (module_name == "ntdll.dll") {
             if (const auto marked =
                     boundary_metadata::write_marker(module.image, boundary_metadata::kMetadataBase);
@@ -386,37 +389,43 @@ std::expected<LoadedSystemModules, RebuildFailure> load_directory_system_modules
         return std::unexpected(loaded_ntdll.error());
     }
 
-    // The other directory DLLs: the four core names map at their reserved
-    // slots (real bytes), everything else takes the extras ladder in sorted
-    // name order - win32u derives there, the rest map as real bytes.
+    // The resident set is the dependency closure, not the directory listing:
+    // ntdll derives first, then the closure loop pulls a directory DLL the
+    // moment a static import names it - the four core names at their reserved
+    // slots, win32u derives on its ladder slot, everything else maps as real
+    // bytes on the ladder in pull order (sorted within a discovery round, so
+    // the base assignment stays deterministic). Directory DLLs the closure
+    // never reaches stay out entirely: not loaded, not in the source table,
+    // no runtime tables.
     const constexpr auto is_core_name = [](const std::string_view folded) {
         return folded == "kernel32.dll" || folded == "kernelbase.dll" || folded == "advapi32.dll" ||
                folded == "user32.dll";
     };
-    std::vector<std::filesystem::path> extras;
+    std::map<std::string, std::filesystem::path> dir_dlls;
     for (const auto& entry : std::filesystem::directory_iterator(dir, probe_ec)) {
         auto name = entry.path().filename().string();
-        if (name.size() <= 4 || name.compare(name.size() - 4, 4, ".dll") != 0) {
-            continue;
-        }
         for (auto& c : name) {
             if (c >= 'A' && c <= 'Z') {
                 c = static_cast<char>(c - 'A' + 'a');
             }
         }
+        if (name.size() <= 4 || name.compare(name.size() - 4, 4, ".dll") != 0) {
+            continue;
+        }
         if (name == "ntdll.dll" || name == "apiset-map.bin") {
             continue;
         }
-        extras.push_back(entry.path());
+        dir_dlls.emplace(name, entry.path());
     }
-    std::sort(extras.begin(), extras.end());
     std::size_t extra_index = 0;
-    for (const auto& path : extras) {
-        std::string folded = path.filename().string();
-        for (auto& c : folded) {
-            if (c >= 'A' && c <= 'Z') {
-                c = static_cast<char>(c - 'A' + 'a');
-            }
+    const auto load_from_dir =
+        [&](const std::string& folded) -> std::expected<void, RebuildFailure> {
+        const auto path_it = dir_dlls.find(folded);
+        if (path_it == dir_dlls.end()) {
+            return std::unexpected(
+                failure(RebuildError::kBadSnapshot,
+                        std::format("system module missing from directory '{}': {}", dir.string(),
+                                    folded)));
         }
         if (is_core_name(folded)) {
             std::size_t slot = 1;
@@ -426,34 +435,24 @@ std::expected<LoadedSystemModules, RebuildFailure> load_directory_system_modules
                     break;
                 }
             }
-            auto bytes = read_file_bytes(path);
+            auto bytes = read_file_bytes(path_it->second);
             if (!bytes.has_value()) {
                 return std::unexpected(bytes.error());
             }
-            if (const auto ok = load_real_module(*bytes, folded, bases[slot],
-                                                 SystemModuleSource::kDirectoryRealBytes, loaded);
-                !ok.has_value()) {
-                return std::unexpected(ok.error());
-            }
-            continue;
+            return load_real_module(*bytes, folded, bases[slot],
+                                    SystemModuleSource::kDirectoryRealBytes, loaded);
         }
         const auto base = extra_module_base(mode, extra_index++);
         if (folded == "win32u.dll") {
-            if (const auto ok = derive_boundary(folded, base, true); !ok.has_value()) {
-                return std::unexpected(ok.error());
-            }
-            continue;
+            return derive_boundary(folded, base, true);
         }
-        auto bytes = read_file_bytes(path);
+        auto bytes = read_file_bytes(path_it->second);
         if (!bytes.has_value()) {
             return std::unexpected(bytes.error());
         }
-        if (const auto ok = load_real_module(*bytes, folded, base,
-                                             SystemModuleSource::kDirectoryRealBytes, loaded);
-            !ok.has_value()) {
-            return std::unexpected(ok.error());
-        }
-    }
+        return load_real_module(*bytes, folded, base, SystemModuleSource::kDirectoryRealBytes,
+                                loaded);
+    };
 
     // Strict closure over the FULL dependency graph: resolve the sample and
     // every resident real module; modules missing from the directory join
@@ -477,22 +476,52 @@ std::expected<LoadedSystemModules, RebuildFailure> load_directory_system_modules
     std::map<std::string, std::string> missing_dependents;
     for (;;) {
         // resolve the sample and each resident real module against the
-        // current set; collect the module-level names still missing
+        // current set; collect the module-level names still missing. Delay
+        // directories do NOT extend the closure (the capture corpus's
+        // records: the real system leaves an unresolvable delayed dependency
+        // on the file's own static failure thunks without loading its target
+        // - the binding pass tolerates those misses); only static imports
+        // pull members in.
         std::vector<loader::UnresolvedImport> loop_unresolved;
         std::vector<std::string> loop_dependents;
-        static_cast<void>(
-            loader::resolve_imports(image, loaded.modules, &loop_unresolved, api_set_ctx, {}));
-        loop_dependents.assign(loop_unresolved.size(),
+        const auto sample_checked = loader::resolve_imports(image, loaded.modules, &loop_unresolved,
+                                                            api_set_ctx, {}, false);
+        if (!sample_checked) {
+            return std::unexpected(
+                failure(RebuildError::kBadSnapshot, "sample import table malformed"));
+        }
+        loop_dependents.resize(loop_unresolved.size(),
                                std::string{}); // sample-direct: no depending module
+        if (!root_image.empty()) {
+            std::vector<loader::UnresolvedImport> root_unresolved;
+            const auto checked =
+                loader::resolve_imports(root_image, loaded.modules, &root_unresolved, api_set_ctx,
+                                        closure_root_name, false);
+            if (!checked) {
+                return std::unexpected(
+                    failure(RebuildError::kBadSnapshot,
+                            std::format("{}: import table malformed", closure_root_name)));
+            }
+            for (const auto& miss : root_unresolved) {
+                loop_unresolved.push_back(miss);
+                loop_dependents.emplace_back(closure_root_name);
+            }
+        }
         for (std::size_t i = 0; i < loaded.modules.size(); ++i) {
             if (loaded.sources[i].second != SystemModuleSource::kDirectoryRealBytes &&
+                loaded.sources[i].second != SystemModuleSource::kDirectoryDerived &&
                 loaded.sources[i].second != SystemModuleSource::kFallbackSynthetic) {
-                continue; // derived boundary images carry no import table
+                continue; // the synthetic/host routes carry no import table here
             }
             std::vector<loader::UnresolvedImport> module_unresolved;
-            static_cast<void>(loader::resolve_imports(
+            const auto checked = loader::resolve_imports(
                 loaded.modules[i].image, loaded.modules, &module_unresolved, api_set_ctx,
-                std::string_view(loaded.modules[i].name.data())));
+                std::string_view(loaded.modules[i].name.data()), false);
+            if (!checked) {
+                return std::unexpected(failure(
+                    RebuildError::kBadSnapshot,
+                    std::format("{}: import table malformed", loaded.modules[i].name.data())));
+            }
             const std::string depending_module(std::string_view(loaded.modules[i].name.data()));
             for (const auto& miss : module_unresolved) {
                 loop_unresolved.emplace_back(miss);
@@ -525,18 +554,25 @@ std::expected<LoadedSystemModules, RebuildFailure> load_directory_system_modules
                 return std::unexpected(
                     failure(RebuildError::kBadSnapshot, "path-shaped dependency: " + folded));
             }
-            if (!resident(folded)) {
-                missing.insert(folded);
-                // remember the depending module for the rejection's wording
-                missing_dependents.emplace(folded, depending_module);
+            if (resident(folded)) {
+                continue;
             }
+            missing.insert(folded);
+            // remember the depending module for the rejection's wording
+            missing_dependents.emplace(folded, depending_module);
         }
         if (missing.empty()) {
-            break;
+            break; // closure stable
         }
-        // the fallback residents join from the frozen synthetic directory;
-        // without the option this is the named rejection
+        // the members the directory cannot supply join from the frozen
+        // synthetic directory; without the option this is the named rejection
         for (const auto& name : missing) {
+            if (dir_dlls.count(name) != 0) {
+                if (const auto ok = load_from_dir(name); !ok) {
+                    return std::unexpected(ok.error());
+                }
+                continue;
+            }
             std::error_code missing_ec;
             const auto synth_path = synthetic_module_dir.empty()
                                         ? std::filesystem::path{}
@@ -579,8 +615,9 @@ std::expected<LoadedSystemModules, RebuildFailure> load_directory_system_modules
     for (std::size_t i = 0; i < loaded.modules.size(); ++i) {
         const auto source = loaded.sources[i].second;
         if (source != SystemModuleSource::kDirectoryRealBytes &&
+            source != SystemModuleSource::kDirectoryDerived &&
             source != SystemModuleSource::kFallbackSynthetic) {
-            continue; // derived boundary images carry no import table
+            continue; // the synthetic/host routes carry no import table here
         }
         auto& module = loaded.modules[i];
         const std::string_view module_name(module.name.data());
@@ -599,12 +636,27 @@ std::expected<LoadedSystemModules, RebuildFailure> load_directory_system_modules
                                     resident_unresolved.front().dll_name,
                                     resident_unresolved.front().function_name)));
         }
+        // the module's delay directory joins the same binding pass: RVA-form
+        // descriptors resolve against the complete resident set and take the
+        // final VAs; resolution misses tolerate (the slot keeps its file
+        // bytes - the file's own static failure thunk); a VA-form or
+        // out-of-range descriptor is this loop's named rejection
+        auto delayed = loader::bind_delayed_imports(
+            module.image, loaded.modules, &resident_unresolved, api_set_ctx, module_name, true);
+        if (!delayed.has_value()) {
+            return std::unexpected(
+                failure(RebuildError::kBadSnapshot,
+                        std::format("{}: delayed import binding failed: {}", module_name,
+                                    loader::load_error_message(delayed.error()))));
+        }
         // Real bodies call each other's imports: a resident module's own
         // resolved imports join the interception set, so an intercepted
         // final name hooks wherever it is called from, not only from the
         // sample (the loop is idempotent - binding re-runs below re-bind to
         // the same VAs, and the registration deduplicates by VA).
-        register_import_intercepts(*bound, loaded.modules, loaded.intercepts);
+        auto module_fixups = *bound;
+        module_fixups.insert(module_fixups.end(), delayed->begin(), delayed->end());
+        register_import_intercepts(module_fixups, loaded.modules, loaded.intercepts);
     }
     // the sample resolves once more over the complete set (idempotent -
     // already-bound slots re-bind to the same VAs)
@@ -614,7 +666,16 @@ std::expected<LoadedSystemModules, RebuildFailure> load_directory_system_modules
         auto resolved =
             loader::resolve_imports(image, loaded.modules, &sample_unresolved, api_set_ctx, {});
         if (resolved.has_value()) {
+            auto delayed = loader::bind_delayed_imports(image, loaded.modules, &sample_unresolved,
+                                                        api_set_ctx, {}, true);
+            if (!delayed.has_value()) {
+                return std::unexpected(
+                    failure(RebuildError::kBadSnapshot,
+                            std::format("sample delayed import binding failed: {}",
+                                        loader::load_error_message(delayed.error()))));
+            }
             fixups = std::move(*resolved);
+            fixups.insert(fixups.end(), delayed->begin(), delayed->end());
         }
     }
     register_import_intercepts(fixups, loaded.modules, loaded.intercepts);
@@ -689,12 +750,40 @@ std::expected<LoadedSnapshot, RebuildFailure> load_snapshot_stream(std::istream&
     // byte) after the first is likewise rejected - the format defines one
     // block per container, and a silent tail would let hand-built doubles
     // through. v1 files stop at the region table - unchanged behavior.
+    // v3 carries the optional pending block (same DLL route) plus exactly one
+    // clock-policy block, in that order. "Absent" is the optional read's
+    // nullopt; every other pending outcome - including a block that starts
+    // like pending and then fails its bounds - is a named rejection. A v3
+    // file without a complete clock block, or with any trailing byte after
+    // it, is not loadable.
     if (loaded.header.version == snapshot::kVersionV2) {
         auto pending = reader.read_pending();
         if (!pending) {
             return std::unexpected(failure(RebuildError::kBadSnapshot));
         }
         loaded.pending = std::move(*pending);
+        char trailing = 0;
+        in.read(&trailing, 1);
+        if (in.gcount() != 0) {
+            return std::unexpected(failure(RebuildError::kBadSnapshot));
+        }
+    } else if (loaded.header.version == snapshot::kVersionV3) {
+        auto pending = reader.read_pending_optional();
+        if (!pending) {
+            return std::unexpected(failure(
+                RebuildError::kBadSnapshot,
+                std::string{"pending: "} + std::string{snapshot::error_message(pending.error())}));
+        }
+        if (pending->has_value()) {
+            loaded.pending = std::move(**pending);
+        }
+        auto clock = reader.read_clock();
+        if (!clock) {
+            return std::unexpected(failure(
+                RebuildError::kBadSnapshot,
+                std::string{"clock: "} + std::string{snapshot::error_message(clock.error())}));
+        }
+        loaded.clock_policy = std::move(*clock);
         char trailing = 0;
         in.read(&trailing, 1);
         if (in.gcount() != 0) {
@@ -708,10 +797,14 @@ std::expected<LoadedSnapshot, RebuildFailure> load_snapshot_stream(std::istream&
 }
 
 // Per-region rebuild order: validate alignment, map with the interpreted
-// permissions, then write the content bytes the capture actually read.
-std::expected<void, RebuildFailure> map_regions(UnicornEngine& unicorn,
-                                                const std::vector<snapshot::Region>& regions)
+// permissions, then write the content bytes the capture actually read. A
+// region that fully covers the KUSER page carves that page out for the
+// host-backed mapping the clock publishes through (returned; null when no
+// region carries it - the fixture worlds without KUSER publish nothing).
+std::expected<KuserHostPage, RebuildFailure>
+map_regions(UnicornEngine& unicorn, const std::vector<snapshot::Region>& regions)
 {
+    KuserHostPage kuser_page;
     for (const auto& region : regions) {
         if (region.header.size == 0) {
             continue; // degenerate entry, nothing to rebuild
@@ -720,16 +813,70 @@ std::expected<void, RebuildFailure> map_regions(UnicornEngine& unicorn,
             region.header.size % kMapAlignment != 0) {
             return std::unexpected(failure(RebuildError::kUnalignedRegion));
         }
-        auto perms = protection_to_perms(region.header.protection);
+        const auto perms = protection_to_perms(region.header.protection);
         // Fault-based dirty tracking: writable regions lose
         // their write permission at map time; the write-prot hook re-grants
         // it page by page on the guest's first write.
+        auto map_perms = perms;
         if (snapshot_protection_writable(region.header.protection)) {
-            perms &= ~static_cast<std::uint32_t>(UC_PROT_WRITE);
+            map_perms &= ~static_cast<std::uint32_t>(UC_PROT_WRITE);
+        }
+        // The KUSER page carve: one region, one aligned page, fully inside
+        // this region. Anything else keeps the plain uc_mem_map path.
+        const bool covers_kuser =
+            region.header.base_address <= kLoaderKUser &&
+            kLoaderKUser + kPageBytes <= region.header.base_address + region.header.size;
+        if (covers_kuser && kuser_page == nullptr) {
+            kuser_page = allocate_kuser_page();
+            if (kuser_page == nullptr) {
+                return std::unexpected(failure(RebuildError::kUnicornFailure));
+            }
+            const auto offset = static_cast<std::size_t>(kLoaderKUser - region.header.base_address);
+            if (region.header.content == snapshot::kContentPresent &&
+                region.content.size() >= offset + kPageBytes) {
+                std::memcpy(kuser_page.get(), region.content.data() + offset, kPageBytes);
+            }
+            if (uc_mem_map_ptr(unicorn.get(), kLoaderKUser, kPageBytes, map_perms,
+                               kuser_page.get()) != UC_ERR_OK) {
+                return std::unexpected(failure(RebuildError::kUnicornFailure));
+            }
+            // The page's before/after slices of the same region keep the
+            // plain mapping and the content bytes their slice carries.
+            const auto map_span =
+                [&](const std::uint64_t base,
+                    const std::uint64_t size) -> std::expected<void, RebuildFailure> {
+                if (uc_mem_map(unicorn.get(), base, static_cast<std::size_t>(size), map_perms) !=
+                    UC_ERR_OK) {
+                    return std::unexpected(failure(RebuildError::kUnicornFailure));
+                }
+                if (region.header.content == snapshot::kContentPresent &&
+                    region.content.size() >= (base - region.header.base_address) + size) {
+                    const auto offset = static_cast<std::size_t>(base - region.header.base_address);
+                    if (uc_mem_write(unicorn.get(), base, region.content.data() + offset,
+                                     static_cast<std::size_t>(size)) != UC_ERR_OK) {
+                        return std::unexpected(failure(RebuildError::kUnicornFailure));
+                    }
+                }
+                return {};
+            };
+            const auto before = kLoaderKUser - region.header.base_address;
+            const auto after =
+                region.header.base_address + region.header.size - (kLoaderKUser + kPageBytes);
+            if (before != 0) {
+                if (const auto mapped = map_span(region.header.base_address, before); !mapped) {
+                    return std::unexpected(mapped.error());
+                }
+            }
+            if (after != 0) {
+                if (const auto mapped = map_span(kLoaderKUser + kPageBytes, after); !mapped) {
+                    return std::unexpected(mapped.error());
+                }
+            }
+            continue;
         }
         if (uc_mem_map(unicorn.get(), region.header.base_address,
                        static_cast<std::size_t>(region.header.size),
-                       static_cast<std::uint32_t>(perms)) != UC_ERR_OK) {
+                       static_cast<std::uint32_t>(map_perms)) != UC_ERR_OK) {
             return std::unexpected(failure(RebuildError::kUnicornFailure));
         }
         if (region.header.content == snapshot::kContentPresent && !region.content.empty() &&
@@ -738,7 +885,7 @@ std::expected<void, RebuildFailure> map_regions(UnicornEngine& unicorn,
             return std::unexpected(failure(RebuildError::kUnicornFailure));
         }
     }
-    return {};
+    return kuser_page;
 }
 
 std::expected<void, RebuildFailure> write_registers_gdt(UnicornEngine& unicorn,
@@ -835,9 +982,11 @@ std::expected<PreparedGuest, RebuildFailure> prepare_guest_stream(std::istream& 
     }
     UnicornEngine unicorn{handle};
 
-    if (const auto mapped = map_regions(unicorn, loaded->regions); !mapped) {
+    auto mapped = map_regions(unicorn, loaded->regions);
+    if (!mapped.has_value()) {
         return std::unexpected(mapped.error());
     }
+    auto kuser_page = std::move(*mapped);
     if (mode == GuestMode::kX86) {
         // the 32-bit segment contract needs a GDT page; park it high in
         // the captured space at the first free 4KB page below 0xFFFE0000
@@ -908,6 +1057,13 @@ std::expected<PreparedGuest, RebuildFailure> prepare_guest_stream(std::istream& 
                             std::string{syscall_run_error_message(restored.error())}));
         }
     }
+    if (loaded->clock_policy.has_value()) {
+        // The v3 container's pinned clock policy: the run stage answers from
+        // it verbatim (a container written under one engine default keeps
+        // replaying under that same clock on any engine version).
+        guest.clock_policy = loaded->clock_policy;
+    }
+    guest.kuser_host_page = std::move(kuser_page);
     if (loaded->pending.has_value()) {
         guest.pending = std::move(loaded->pending);
         if (const auto attached = attach_resident_world(guest); !attached.has_value()) {
@@ -939,17 +1095,18 @@ std::expected<PreparedGuest, RebuildFailure> prepare_guest_stream(std::istream& 
 // the sample's imports against them and registers the intercepted
 // entries. Returns the module set with its guest-side map bytes and
 // the intercepted (VA, handler id) pairs.
-std::expected<LoadedSystemModules, RebuildFailure>
-load_system_modules(const GuestMode mode, const std::filesystem::path& synthetic_module_dir,
-                    std::vector<std::uint8_t>& image,
-                    const std::filesystem::path& system_modules_dir,
-                    const bool system_modules_fallback)
+std::expected<LoadedSystemModules, RebuildFailure> load_system_modules(
+    const GuestMode mode, const std::filesystem::path& synthetic_module_dir,
+    std::vector<std::uint8_t>& image, const std::filesystem::path& system_modules_dir,
+    const bool system_modules_fallback, const std::span<const std::uint8_t> closure_root,
+    const std::string_view closure_root_name)
 {
     // Directory mode: the strict source tiers, no host system directories,
     // no silent synthetic mixing.
     if (!system_modules_dir.empty()) {
         return load_directory_system_modules(mode, system_modules_dir, system_modules_fallback,
-                                             synthetic_module_dir, image);
+                                             synthetic_module_dir, image, closure_root,
+                                             closure_root_name);
     }
     LoadedSystemModules loaded;
     // one resident module: map its bytes at the fixed base, relocate by the
@@ -1105,13 +1262,14 @@ load_system_modules(const GuestMode mode, const std::filesystem::path& synthetic
 
 // Opens the unicorn instance and builds the loader route's address space:
 // the NULL guard, the sample image (write-protected for the fault-based
-// dirty tracking), KUSER, the deterministic stack/heap/env regions, the
+// dirty tracking), KUSER (host-backed: the clock publishes through the
+// returned buffer), the deterministic stack/heap/env regions, the
 // x86 GDT page, then the resident module bytes and the sample itself,
 // and the KUSER semantic fields.
 std::expected<UnicornEngine, RebuildFailure>
 map_loader_address_space(const GuestMode mode, const std::uint64_t base,
                          const std::uint64_t image_size, const std::vector<std::uint8_t>& image,
-                         const LoadedSystemModules& loaded)
+                         const LoadedSystemModules& loaded, KuserHostPage& out_kuser_page)
 {
     const auto& layout = layout_for(mode);
     const auto& system_maps = loaded.maps;
@@ -1123,6 +1281,11 @@ map_loader_address_space(const GuestMode mode, const std::uint64_t base,
     }
     UnicornEngine unicorn{handle};
 
+    out_kuser_page = allocate_kuser_page();
+    if (out_kuser_page == nullptr) {
+        return std::unexpected(failure(RebuildError::kUnicornFailure));
+    }
+
     const auto image_span = static_cast<std::size_t>(image_size);
     // Fault-based dirty tracking: the
     // guest-writable loader regions map without write permission - the
@@ -1131,7 +1294,8 @@ map_loader_address_space(const GuestMode mode, const std::uint64_t base,
     constexpr auto kNoWrite = static_cast<std::uint32_t>(UC_PROT_READ | UC_PROT_EXEC);
     if (uc_mem_map(unicorn.get(), 0, kLoaderNullBytes, UC_PROT_NONE) != UC_ERR_OK ||
         uc_mem_map(unicorn.get(), base, image_span, kNoWrite) != UC_ERR_OK ||
-        uc_mem_map(unicorn.get(), kLoaderKUser, 0x1000, UC_PROT_READ) != UC_ERR_OK ||
+        uc_mem_map_ptr(unicorn.get(), kLoaderKUser, kPageBytes, UC_PROT_READ,
+                       out_kuser_page.get()) != UC_ERR_OK ||
         uc_mem_map(unicorn.get(), layout.stack_base, layout.stack_size, kNoWrite) != UC_ERR_OK ||
         uc_mem_map(unicorn.get(), layout.heap_base, layout.heap_size, kNoWrite) != UC_ERR_OK ||
         uc_mem_map(unicorn.get(), layout.env_base, layout.env_block_size, kNoWrite) != UC_ERR_OK ||
@@ -1263,7 +1427,8 @@ seed_ntdll_ifnt(UnicornEngine& unicorn, const GuestMode mode, const bool fidelit
 std::expected<LoaderWorld, RebuildFailure>
 build_loader_world(UnicornEngine& unicorn, const GuestMode mode, const LoadedSystemModules& loaded,
                    const std::vector<std::uint8_t>& image, const std::uint64_t base,
-                   const std::uint64_t image_size)
+                   const std::uint64_t image_size, std::uint8_t* kuser_page,
+                   const std::string_view arrival_name)
 {
     LoaderWorld world;
     auto& loader_exports = world.exports;
@@ -1272,11 +1437,17 @@ build_loader_world(UnicornEngine& unicorn, const GuestMode mode, const LoadedSys
     const auto& layout = layout_for(mode);
     const auto& system_modules = loaded.modules;
 
-    // KUSER_SHARED_DATA semantic fields: fixed deterministic values
+    // KUSER_SHARED_DATA semantic fields: fixed deterministic values. The
+    // page is the host-backed mapping (always present on this route) - the
+    // seed lands in the buffer the clock publishes through.
     {
         std::vector<std::uint8_t> kuser(0x1000, 0);
         loader::fill_kuser_shared_data(kuser);
-        uc_mem_write(unicorn.get(), kLoaderKUser, kuser.data(), kuser.size());
+        if (kuser_page != nullptr) {
+            std::memcpy(kuser_page, kuser.data(), kuser.size());
+        } else {
+            uc_mem_write(unicorn.get(), kLoaderKUser, kuser.data(), kuser.size());
+        }
     }
 
     // loader tables: the exports indexed at load time feed the
@@ -1304,8 +1475,23 @@ build_loader_world(UnicornEngine& unicorn, const GuestMode mode, const LoadedSys
 
     // regions + attribution: the image, system modules, KUSER, stack, heap
     // and the environment block; the loader sample joins as its own module so
-    // behavior attribution and monitored windows work unchanged
+    // behavior attribution and monitored windows work unchanged. The image
+    // order IS the InLoadOrder chain order (main image first, then the
+    // resident set): the replay side rebuilds its module list from the Ldr
+    // walk, and the two lists must align member for member.
 
+    mem_region::ModuleImage loader_image;
+    loader_image.module.base = base;
+    loader_image.module.size = image_size;
+    const std::string module_name = "loader_image";
+    std::copy(module_name.begin(), module_name.end(), loader_image.module.name.begin());
+    loader_image.header_bytes.assign(image.begin(), image.begin() + 0x1000);
+    images.push_back(loader_image);
+    // the guest-visible Ldr spelling is the entry image's arrival name, not
+    // the host attribution placeholder: the synthetic `loader_image` name
+    // never enters a Ldr table entry
+    const std::string entry_arrival{arrival_name.empty() ? std::string{module_name}
+                                                         : std::string{arrival_name}};
     for (const auto& system : system_modules) {
         mem_region::ModuleImage system_image;
         system_image.module.base = system.base;
@@ -1314,13 +1500,6 @@ build_loader_world(UnicornEngine& unicorn, const GuestMode mode, const LoadedSys
         system_image.header_bytes.assign(system.image.begin(), system.image.begin() + 0x1000);
         images.push_back(std::move(system_image));
     }
-    mem_region::ModuleImage loader_image;
-    loader_image.module.base = base;
-    loader_image.module.size = image_size;
-    const std::string module_name = "loader_image";
-    std::copy(module_name.begin(), module_name.end(), loader_image.module.name.begin());
-    loader_image.header_bytes.assign(image.begin(), image.begin() + 0x1000);
-    images.push_back(loader_image);
 
     regions.push_back(mem_region::RegionRecord{base, image_size, 0x40, kMemImage});
     for (const auto& system : system_modules) {
@@ -1347,21 +1526,75 @@ build_loader_world(UnicornEngine& unicorn, const GuestMode mode, const LoadedSys
     // for now both modes use the x64 shape, which only x64 samples consume)
     std::vector<loader::EnvModule> env_modules;
     for (const auto& image_rec : images) {
-        env_modules.push_back({image_rec.module.base,
-                               static_cast<std::uint32_t>(image_rec.module.size),
-                               std::string(image_rec.module.name.data())});
+        // the entry image's Ldr entry carries the arrival name; system
+        // modules carry their own names (the host attribution placeholder
+        // never reaches a guest-visible table)
+        const bool is_entry = image_rec.module.base == base;
+        env_modules.push_back(
+            {image_rec.module.base, static_cast<std::uint32_t>(image_rec.module.size),
+             is_entry ? entry_arrival : std::string(image_rec.module.name.data())});
+    }
+    // Three chains threaded per the real loader's shape (the capture
+    // corpus's three-chain record, pinned in the crafted-world change
+    // directory): load and memory both lead with the main image; the init
+    // chain excludes it and starts at ntdll with kernelbase before
+    // kernel32 - never one chain's order extrapolated onto another.
+    const auto entry_index =
+        static_cast<std::size_t>(std::find_if(images.begin(), images.end(),
+                                              [base](const mem_region::ModuleImage& image_rec) {
+                                                  return image_rec.module.base == base;
+                                              }) -
+                                 images.begin());
+    loader::ChainOrders orders;
+    for (std::size_t i = 0; i < env_modules.size(); ++i) {
+        if (i != entry_index) {
+            orders.init.push_back(i);
+        }
+    }
+    // the record's init shape: ntdll first, kernelbase before kernel32,
+    // every other module (none in the record) appended in member order
+    const auto init_rank = [](const std::string& name) {
+        if (name == "ntdll.dll") {
+            return 0;
+        }
+        if (name == "kernelbase.dll") {
+            return 1;
+        }
+        if (name == "kernel32.dll") {
+            return 2;
+        }
+        return 3;
+    };
+    std::stable_sort(orders.init.begin(), orders.init.end(),
+                     [init_rank, &env_modules](std::size_t a, std::size_t b) {
+                         return init_rank(env_modules[a].name) < init_rank(env_modules[b].name);
+                     });
+    orders.load.push_back(entry_index);
+    orders.memory.push_back(entry_index);
+    for (std::size_t i = 0; i < env_modules.size(); ++i) {
+        if (i != entry_index) {
+            orders.load.push_back(i);
+            orders.memory.push_back(i);
+        }
     }
     // the TEB stack pair must describe the mapped stack exactly: the entry
     // rsp sits kLoaderStackTop-0x1000, and RtlDispatchException validates
     // the dispatch Rsp against [TEB.StackLimit, TEB.StackBase) - a declared
     // top below the real top makes every early fault look like a bad stack
     const auto stack_top = layout.stack_base + layout.stack_size;
-    const auto env =
+    const auto env_build =
         mode == GuestMode::kX86
             ? loader::build_environment_x86(layout.env_base, base, stack_top, layout.stack_base,
                                             layout.heap_base, env_modules)
             : loader::build_environment(layout.env_base, base, stack_top, layout.stack_base,
-                                        layout.heap_base, env_modules);
+                                        layout.heap_base, env_modules, orders);
+    if (!env_build) {
+        return std::unexpected(
+            failure(RebuildError::kBadSnapshot,
+                    std::format("ldr entry name '{}' exceeds the environment name buffer",
+                                env_build.error().name)));
+    }
+    const auto& env = *env_build;
     if (uc_mem_write(unicorn.get(), layout.env_base, env.env.data(), env.env.size()) != UC_ERR_OK) {
         return std::unexpected(failure(RebuildError::kUnicornFailure));
     }
@@ -1427,7 +1660,10 @@ seed_wow64_transition(UnicornEngine& unicorn, const GuestMode mode,
 std::expected<PreparedGuest, RebuildFailure>
 prepare_pe_file(const std::filesystem::path& path, bool fidelity_seams,
                 const std::filesystem::path& synthetic_module_dir,
-                const std::filesystem::path& system_modules_dir, const bool system_modules_fallback)
+                const std::filesystem::path& system_modules_dir, const bool system_modules_fallback,
+                const std::string_view arrival_name,
+                const std::span<const std::uint8_t> closure_root,
+                const std::string_view closure_root_name)
 {
     std::ifstream in(path, std::ios::binary);
     if (!in) {
@@ -1459,8 +1695,9 @@ prepare_pe_file(const std::filesystem::path& path, bool fidelity_seams,
         callbacks = std::vector<std::uint64_t>{};
     }
 
-    auto system_loaded = load_system_modules(mode, synthetic_module_dir, *image, system_modules_dir,
-                                             system_modules_fallback);
+    auto system_loaded =
+        load_system_modules(mode, synthetic_module_dir, *image, system_modules_dir,
+                            system_modules_fallback, closure_root, closure_root_name);
     if (!system_loaded.has_value()) {
         return std::unexpected(system_loaded.error());
     }
@@ -1483,8 +1720,9 @@ prepare_pe_file(const std::filesystem::path& path, bool fidelity_seams,
     std::vector<std::uint64_t> guest_boundary_trap_vas;
     std::map<std::uint64_t, std::tuple<std::string, std::string, std::uint32_t>>
         guest_boundary_trap_names;
-    auto unicorn_result =
-        map_loader_address_space(mode, mapped_base, info->image_size, *image, *system_loaded);
+    KuserHostPage kuser_page;
+    auto unicorn_result = map_loader_address_space(mode, mapped_base, info->image_size, *image,
+                                                   *system_loaded, kuser_page);
     if (!unicorn_result.has_value()) {
         return std::unexpected(unicorn_result.error());
     }
@@ -1495,8 +1733,9 @@ prepare_pe_file(const std::filesystem::path& path, bool fidelity_seams,
         !seeded.has_value()) {
         return std::unexpected(seeded.error());
     }
-    auto world =
-        build_loader_world(unicorn, mode, *system_loaded, *image, mapped_base, info->image_size);
+    auto world = build_loader_world(
+        unicorn, mode, *system_loaded, *image, mapped_base, info->image_size, kuser_page.get(),
+        arrival_name.empty() ? std::string_view{path.filename().string()} : arrival_name);
     if (!world.has_value()) {
         return std::unexpected(world.error());
     }
@@ -1666,6 +1905,7 @@ prepare_pe_file(const std::filesystem::path& path, bool fidelity_seams,
     guest.loader_route = true; // synthetic Ldr: LdrLoadDll misses stay answered
     // directory-mode world facts: empty in the synthetic/host routes
     guest.directory_mode = !system_modules_dir.empty();
+    guest.kuser_host_page = std::move(kuser_page);
     guest.module_sources = std::move(system_loaded->sources);
     guest.boundary_rules = std::move(system_loaded->boundary_rules);
     guest.api_set_map = std::move(system_loaded->api_set_map);

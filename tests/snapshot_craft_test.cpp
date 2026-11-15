@@ -16,6 +16,7 @@
 #include "test_temp.hpp"
 
 #include "behavior_fact.h"
+#include <sheller/clock_policy.h>
 #include <sheller/snapshot.h>
 #include <sheller/syscallrun.h>
 
@@ -74,6 +75,7 @@ struct ParsedContainer {
     snapshot::Metadata metadata{};
     std::vector<snapshot::Region> regions;
     std::optional<snapshot::PendingModule> pending{};
+    std::optional<snapshot::ClockPolicy> clock{};
     std::size_t bytes{};
 };
 
@@ -116,6 +118,19 @@ ParsedContainer parse_container(const std::vector<std::uint8_t>& bytes)
             parsed.pending = std::move(*pending);
         }
     }
+    if (parsed.header.version == snapshot::kVersionV3) {
+        // The engine's production containers: pending block optional, clock
+        // block exactly one, in that order.
+        auto pending = reader.read_pending();
+        if (pending.has_value()) {
+            parsed.pending = std::move(*pending);
+        }
+        auto clock = reader.read_clock();
+        EXPECT_TRUE(clock.has_value());
+        if (clock.has_value()) {
+            parsed.clock = std::move(*clock);
+        }
+    }
     parsed.bytes = bytes.size();
     return parsed;
 }
@@ -137,6 +152,12 @@ std::vector<std::uint8_t> serialize_container(const ParsedContainer& parsed)
         EXPECT_TRUE(writer.write_region(region.header, content).has_value());
     }
     EXPECT_TRUE(writer.finalize_region_count().has_value());
+    if (parsed.pending.has_value()) {
+        EXPECT_TRUE(writer.write_pending(*parsed.pending).has_value());
+    }
+    if (parsed.clock.has_value()) {
+        EXPECT_TRUE(writer.write_clock(*parsed.clock).has_value());
+    }
     const auto text = out.str();
     return {text.begin(), text.end()};
 }
@@ -189,11 +210,11 @@ std::optional<std::uint64_t> ldr_entry_for(const ParsedContainer& parsed,
     const auto head = ldr + 0x10;
     auto node = read64(head);
     for (std::size_t i = 0; i < 64 && node != 0 && node != head; ++i) {
-        const auto length = read16(node + 0x58);
+        const auto length = read16(node + 0x58); // bytes: UTF-16LE, 2 per character
         const auto buffer = read64(node + 0x60);
         std::string candidate;
-        candidate.reserve(length);
-        for (std::uint16_t c = 0; c < length; ++c) {
+        candidate.reserve(length / 2);
+        for (std::uint16_t c = 0; c < length; c += 2) {
             candidate.push_back(static_cast<char>(read_virtual(parsed, buffer + c, 1)[0]));
         }
         if (candidate == name) {
@@ -368,7 +389,9 @@ TEST(SnapshotCraft, ContainerSelfSufficientReplay)
     const auto container = craft_packed();
     ASSERT_FALSE(container.empty());
     const auto parsed = parse_container(container);
-    EXPECT_EQ(parsed.header.version, snapshot::kVersion);
+    EXPECT_EQ(parsed.header.version, snapshot::kVersionV3);
+    EXPECT_TRUE(parsed.clock.has_value()); // the engine production path pins the policy
+    EXPECT_EQ(*parsed.clock, snapshot::kDefaultClockPolicy);
     EXPECT_EQ(parsed.header.bitness, snapshot::kBitness64);
     EXPECT_NE(parsed.metadata.peb_address, 0U);
     EXPECT_NE(parsed.metadata.teb_address, 0U);
@@ -510,7 +533,10 @@ TEST(SnapshotCraft, AttributionSeesSampleAndSyntheticModules)
                                          return image.module.base == probe->image_base;
                                      });
     ASSERT_NE(sample, probe->images.end());
-    EXPECT_EQ(std::string(sample->module.name.data()), "loader_image");
+    // container-derived attribution reads the guest-visible Ldr arrival
+    // name: the sample's own file name, never the construction-side
+    // `loader_image` attribution placeholder
+    EXPECT_EQ(std::string(sample->module.name.data()), "packed.exe");
 
     engine::mem_region::ImageLayout layout;
     ASSERT_EQ(engine::mem_region::parse_section_table(sample->header_bytes.data(),
@@ -532,7 +558,7 @@ TEST(SnapshotCraft, AttributionSeesSampleAndSyntheticModules)
     engine::mem_region::MemRegionMap map(probe->images, probe->regions);
     const auto attribution = map.query(probe->image_base + entry_rva);
     ASSERT_TRUE(attribution.has_value());
-    EXPECT_EQ(attribution->module_name, "loader_image");
+    EXPECT_EQ(attribution->module_name, "packed.exe");
     EXPECT_EQ(std::string(attribution->section_name), std::string(owning_section->name.data()));
     EXPECT_NE(attribution->section_name, "headers");
 }
@@ -644,6 +670,12 @@ TEST(SnapshotCraft, ReattachRebuildsTheConstructionTables)
     for (std::size_t i = 0; i < replay->loader_modules.size(); ++i) {
         EXPECT_EQ(replay->loader_modules[i].base, construction->loader_modules[i].base);
         EXPECT_EQ(replay->loader_modules[i].size, construction->loader_modules[i].size);
+        if (replay->loader_modules[i].base == replay->metadata.image_base) {
+            // the entry image: the replay carries the guest-visible arrival
+            // name, the construction's list the host attribution placeholder
+            EXPECT_EQ(std::string(replay->loader_modules[i].name.data()), "packed.exe");
+            continue;
+        }
         EXPECT_EQ(std::string(replay->loader_modules[i].name.data()),
                   std::string(construction->loader_modules[i].name.data()));
     }
@@ -877,11 +909,14 @@ TEST(SnapshotCraft, CraftedDllContainerCarriesThePendingBlockAndRunnerWorld)
     ASSERT_TRUE(container.has_value()) << (container.has_value() ? "" : container.error().detail);
 
     const auto parsed = parse_container(*container);
-    EXPECT_EQ(parsed.header.version, snapshot::kVersionV2);
+    EXPECT_EQ(parsed.header.version, snapshot::kVersionV3);
     ASSERT_TRUE(parsed.pending.has_value());
     EXPECT_EQ(parsed.pending->name, "packed.dll");
     EXPECT_EQ(parsed.pending->bitness, snapshot::kBitness64);
     EXPECT_EQ(parsed.pending->bytes, sample);
+    // The engine production write path pins the default clock policy.
+    ASSERT_TRUE(parsed.clock.has_value());
+    EXPECT_EQ(*parsed.clock, snapshot::kDefaultClockPolicy);
     // The world is the runner's: the registered entry is the load stub, the
     // sample bytes ride the block alone.
     EXPECT_EQ(parsed.registers.rip, parsed.metadata.entry_address);
@@ -994,8 +1029,11 @@ TEST(SnapshotCraft, StrippedBlockReplaysAsAPlainExeWorld)
     const auto parsed = parse_container(*v2);
     ASSERT_TRUE(parsed.pending.has_value());
     auto stripped = parsed;
+    // The plain EXE world: no trailing blocks at all - a v1 container that
+    // replays under the engine default clock policy.
     stripped.header.version = snapshot::kVersion;
     stripped.pending.reset();
+    stripped.clock.reset();
     const auto v1 = serialize_container(stripped);
 
     std::string output;
@@ -1014,6 +1052,38 @@ TEST(SnapshotCraft, StrippedBlockReplaysAsAPlainExeWorld)
     EXPECT_EQ(stats->exit_code, 0x5aU);
     EXPECT_EQ(output.find("hello world from dllmain"), std::string::npos)
         << "the stripped world must not run the sample";
+}
+
+TEST(SnapshotCraft, CorruptPendingBlockOnV3IsRejected)
+{
+    // A block that starts like pending and then fails its bounds is a
+    // corrupt container, not an absent pending block: the loader must name
+    // the rejection instead of silently loading the world without the
+    // module (the exact shape: PENDMOD1 + zero name length + a well-formed
+    // clock block behind it).
+    auto container =
+        engine::craft_sample_container(SHELLER_SAMPLE_PACKED_DLL_PATH, false, synth_dir());
+    ASSERT_TRUE(container.has_value());
+    auto corrupt = *container;
+    const std::string marker = "PENDMOD1";
+    const auto at = std::search(corrupt.begin(), corrupt.end(), marker.begin(), marker.end());
+    ASSERT_NE(at, corrupt.end());
+    const auto name_len_at = static_cast<std::size_t>(at - corrupt.begin()) + marker.size();
+    ASSERT_LE(name_len_at + 4, corrupt.size());
+    corrupt[name_len_at] = 0; // zero name length: the bounds failure
+    corrupt[name_len_at + 1] = 0;
+    corrupt[name_len_at + 2] = 0;
+    corrupt[name_len_at + 3] = 0;
+    // Remove the rest of the pending block: the valid clock must immediately
+    // follow the rejected length, otherwise even the old loader rejects on
+    // its next marker and this test cannot detect swallowed pending errors.
+    corrupt.erase(corrupt.begin() + name_len_at + 4, corrupt.end() - snapshot::kClockBlockSize);
+
+    std::ispanstream in{std::span<char>{reinterpret_cast<char*>(corrupt.data()), corrupt.size()}};
+    const auto replay = engine::prepare_guest_stream(in);
+    ASSERT_FALSE(replay.has_value()) << "a corrupt pending block loaded as an EXE world";
+    EXPECT_EQ(replay.error().error, engine::RebuildError::kBadSnapshot);
+    EXPECT_TRUE(replay.error().detail.starts_with("pending: ")) << replay.error().detail;
 }
 
 // Admission negative faces: a missing module, an unknown export and an

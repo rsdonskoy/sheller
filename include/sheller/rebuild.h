@@ -1,5 +1,5 @@
-// sheller public rebuild header - the engine-side consumer of snapshot v1
-// files: rebuild the captured guest world inside Unicorn at its original
+// sheller public rebuild header - the engine-side consumer of snapshot
+// containers (v1/v2/v3): rebuild the captured guest world at its original
 // addresses, run a bounded stretch of code, and report whether execution
 // reached the entrypoint. Standard library only: no unicorn or Windows
 // headers may leak in here; the Unicorn instance lives and dies inside the

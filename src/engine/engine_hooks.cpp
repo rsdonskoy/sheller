@@ -131,12 +131,52 @@ void on_boundary_trap(uc_engine* uc, const std::uint64_t address, const std::uin
     uc_emu_stop(uc);
 }
 
+// The span form: one code hook over a trap-owning module's whole image, so
+// every instruction of that module arrives here. The dispatch index answers
+// whether this address is a trap entry; a miss returns without touching the
+// state, and a hit takes the exact-entry path above unchanged (same VA, same
+// pre-instruction trigger point, same named diagnosis).
+void on_boundary_trap_span(uc_engine* const uc, const std::uint64_t address, const std::uint32_t,
+                           void* const user_data)
+{
+    const auto* state = static_cast<const SyscallRunState*>(user_data);
+    if (find_trap_span_entry(state->trap_span_table, address) == nullptr) {
+        return;
+    }
+    on_boundary_trap(uc, address, 0, user_data);
+}
+
+void publish_kusd_ticks(SyscallRunState& state, const bool force)
+{
+    // The quantized pure function of the block count, stored straight into
+    // the world's host-backed KUSER page (see kLoaderKUser for why not
+    // uc_mem_write): the three same-value fields keep the engine's
+    // long-standing contract - coordinates stay untouched - and the guest's
+    // loads read the same RAM the stores hit.
+    auto* const page = state.kuser_host_page;
+    if (page == nullptr) {
+        return;
+    }
+    const std::uint32_t ticks = state.virtual_ticks();
+    if (!force && ticks == state.clock_published_ticks) {
+        return;
+    }
+    state.clock_published_ticks = ticks;
+    std::memcpy(page + 0x0004, &ticks, sizeof ticks);
+    std::memcpy(page + 0x0320, &ticks, sizeof ticks);
+    std::memcpy(page + 0x0324, &ticks, sizeof ticks);
+}
+
 void on_syscall_run_block(uc_engine* uc, const std::uint64_t address, const std::uint32_t,
                           void* const user_data)
 {
     auto* state = static_cast<SyscallRunState*>(user_data);
     ++state->blocks;
     state->last_block_address = address;
+    // Clock publication: the quantized TickCount crosses a threshold once
+    // every blocks_per_tick blocks; between crossings this is one compare
+    // and the store is a plain host write.
+    publish_kusd_ticks(*state, false);
 
     // Burn-loop cycle detection: a block already inside the recent-cycle
     // ring extends the run; a new address shifts the ring. The syscall path
@@ -442,10 +482,15 @@ bool on_rdtsc_callback(uc_engine* const uc, void* const user_data)
     // Loop-gate evidence bit: the probe reads this to reject clock-fed
     // cycles from native admission. Pure bookkeeping - no event change.
     state->probe_insn_fired = true;
-    // Deterministic virtual TSC: advanced by executed instructions (the leg
-    // loop), so rdtsc-based delay waits complete in bounded emulation time
-    // and replays stay host-independent (the host TSC leaked through before).
-    const std::uint64_t tsc = state->virtual_tsc;
+    // Deterministic virtual TSC: base + per-block delta at the current block
+    // position (read-time evaluation), so rdtsc-based delay waits complete
+    // in bounded emulation time, replays stay host-independent, and the
+    // answer cannot depend on how the run's legs were laid out.
+    const std::uint64_t tsc = state->virtual_tsc();
+    if (diag::wanted(sheller::log::level::kDebug, state->rdtsc_trace)) {
+        diag::emit(sheller::log::level::kDebug, state->rdtsc_trace, "[rdtsc] blocks={} tsc=0x{:x}",
+                   state->blocks, tsc);
+    }
     // uc_reg_write reads the full register width from the buffer, so both
     // halves are zero-extended u64s - a u32 local makes unicorn pull adjacent
     // host stack into the guest-visible high half (per-process entropy).
@@ -467,7 +512,13 @@ bool on_rdtscp_callback(uc_engine* const uc, void* const user_data)
 {
     auto* state = static_cast<SyscallRunState*>(user_data);
     state->probe_insn_fired = true; // loop-gate evidence, see on_rdtsc_callback
-    const std::uint64_t tsc = state->virtual_tsc;
+    const std::uint64_t tsc = state->virtual_tsc();
+    if (diag::wanted(sheller::log::level::kDebug, state->rdtsc_trace)) {
+        diag::emit(sheller::log::level::kDebug, state->rdtsc_trace, "[rdtscp] blocks={} tsc=0x{:x}",
+                   state->blocks, tsc);
+    }
+    // The same full-width u64 halves as rdtsc (see on_rdtsc_callback), plus
+    // the deterministic zero in ECX.
     const std::uint64_t low = tsc & 0xFFFFFFFF;
     const std::uint64_t high = tsc >> 32;
     const std::uint64_t aux = 0;
@@ -815,8 +866,11 @@ bool on_cpuid_callback(uc_engine* const uc, void* const user_data)
     std::uint32_t ecx = 0;
     std::uint32_t edx = 0;
     switch (static_cast<std::uint32_t>(leaf)) {
-    case 0: // max leaf plus the GenuineIntel vendor string
-        eax = 7;
+    case 0: // max leaf plus the GenuineIntel vendor string. The time leaves
+            // 0x15/0x16 are answered below, so the advertised limit names
+            // them - a guest that enumerates before querying would otherwise
+            // skip the pinned values entirely.
+        eax = 0x16;
         ebx = 0x756E6547; // "uneG"
         edx = 0x49656E69; // "Ieni"
         ecx = 0x6C65746E; // "letn"
@@ -831,6 +885,16 @@ bool on_cpuid_callback(uc_engine* const uc, void* const user_data)
         if (static_cast<std::uint32_t>(subleaf) == 0) {
             eax = 0; // no further subleaves
         }
+        break;
+    case 0x15: // TSC/crystal clock ratio: the container's pinned ratio pair
+        eax = state->clock.cpuid_0x15[0];
+        ebx = state->clock.cpuid_0x15[1];
+        ecx = state->clock.cpuid_0x15[2];
+        break;
+    case 0x16: // nominal core frequencies (MHz): pinned to the TSC face
+        eax = state->clock.cpuid_0x16[0];
+        ebx = state->clock.cpuid_0x16[1];
+        ecx = state->clock.cpuid_0x16[2];
         break;
     case 0x80000000: // extended limit
         eax = 0x80000001;

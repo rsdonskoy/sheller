@@ -1,16 +1,27 @@
 // Boundary derivation: the pure byte-level
-// function from a user-supplied system-module directory file to the stub
+// function from a user-supplied system-module directory file to the guest
 // image the directory mode maps for a boundary-pair module (ntdll, win32u).
-// Export names, ordinals, aliases and forwarder relations survive verbatim;
-// every EAT address is rebuilt against the derived image (never a copied
-// RVA into the source). Syscall service exports keep their `mov eax, <num>`
-// shape only after the source body passes stub-shape validation - the name
-// prefix never decides. Bodies for manifest-classified trap exports are
-// ud2; compat exports carry the manifest's deterministic return; data
-// exports land in known-layout slots. Same input bytes in, byte-identical
-// image out. The classification input is the versioned boundary manifest's
-// rule set; an export it does not cover is a named rejection, never a
-// guessed stub. No unicorn, no host state - fully unit-testable.
+// The real file is the base: the derived image is the source's own folded
+// image (SizeOfImage and the section list are the source's), taken through
+// the same load pipeline as every real module - build, real relocation
+// table, then the resident IAT/delayed-import binding that happens after
+// the whole set is known. The boundary dispositions (syscall numbers, the
+// four-kind classification, the counting whitelist, compat answers) ride
+// the address-level runtime table this function returns - the EAT keeps
+// its source addresses and the verified syscall stubs keep their source
+// bytes, so nothing in the image depends on a synthesized stub. Image
+// writes are limited to the explicit whitelist: the reserved DOS e_res2
+// marker slot (verified zero in the source), manifest-declared data slots
+// whose mapped bytes are free (all zero), and manifest-defined
+// compat/intercept stub bodies at their own export addresses. The
+// synthetic-era fixed weld slots are retired on this route - the derive
+// never lays out or overwrites image content outside the whitelist.
+// Syscall service exports keep their `mov eax, <num>` shape only after the
+// source body passes stub-shape validation - the name prefix never
+// decides. Same input bytes and base in, byte-identical image out. The
+// classification input is the versioned boundary manifest's rule set; an
+// export it does not cover is a named rejection, never a guessed stub. No
+// unicorn, no host state - fully unit-testable.
 
 #ifndef SHELLER_LOADER_BOUNDARY_DERIVE_H
 #define SHELLER_LOADER_BOUNDARY_DERIVE_H
@@ -72,15 +83,17 @@ struct DerivedBoundaryExport {
     BoundaryKind kind{};
     bool forwarded{};               // forwarder relation preserved from the source
     std::string forwarder_target;   // the preserved "dll.func" spelling
-    std::uint64_t body_rva{};       // the derived EAT value: body/slot RVA, or
-                                    // the preserved forwarder-string RVA inside
-                                    // this image; 0 for EAT holes
+    std::uint64_t body_rva{};       // the source EAT value: the export's own
+                                    // address (a forwarder keeps the string's
+                                    // RVA inside the export directory); 0 for
+                                    // EAT holes
     std::uint32_t syscall_number{}; // kSyscallStub only: number validated in the source body
 };
 
 enum class BoundaryDeriveError {
     kNone = 0,
-    kBadSource,          // the directory file is not a walkable PE
+    kBadSource,          // the directory file is not a walkable PE, cannot
+                         // take its mapped base, or carries a dirty marker slot
     kUnsupportedMachine, // the derivation covers AMD64 boundary images only
     kNoExportDirectory,  // a boundary-pair member must export
     kUnknownExport,      // export outside the manifest rule set
@@ -98,20 +111,21 @@ struct BoundaryDeriveFailure {
 };
 
 struct DerivedBoundary {
-    std::vector<std::uint8_t> image; // full SizeOfImage bytes (a parse_pe-able PE)
+    std::vector<std::uint8_t> image; // the source's folded SizeOfImage bytes:
+                                     // built, relocated to `base`, whitelist
+                                     // slots written - ready to map
     // Every source export in source ordinal order, names in source name
     // order within an ordinal (aliases appear once per name).
     std::vector<DerivedBoundaryExport> exports;
-    std::uint64_t weld_data_rva{}; // engine weld-slot section RVA; ntdll only, else 0
 };
 
-// Derives the stub image for one boundary-pair module from its directory
-// file bytes. The weld-slot layout (ntdll .data at the engine's fixed RVA)
-// and the reserved DOS e_res2 marker slot are part of the
-// generated-image contract.
+// Derives the guest image for one boundary-pair module from its directory
+// file bytes and the base the module maps at. The reserved DOS e_res2
+// marker slot stays zero here; the engine's directory-mode marker writes
+// it after the load pipeline.
 std::expected<DerivedBoundary, BoundaryDeriveFailure>
 derive_boundary_image(std::span<const std::uint8_t> file, std::string_view module_name,
-                      const std::vector<BoundaryRule>& rules);
+                      const std::vector<BoundaryRule>& rules, std::uint64_t base);
 
 // Stub-shape validation over host-side bytes: the x64 canonical ntdll stub
 // prefix `4C 8B D1 B8` (mov r10, rcx; mov eax, imm32) with the number at
@@ -124,12 +138,6 @@ std::optional<std::uint32_t> syscall_stub_number_from_bytes(std::span<const std:
 // marker is written into.
 inline constexpr std::uint32_t kBoundaryMarkerOffset = 0x28;
 inline constexpr std::uint32_t kBoundaryMarkerSize = 20;
-
-// The engine weld-slot contract the derived ntdll honors (parity with
-// tools/gen_synth_modules.py): .text spans 0x40000 and the fixed .data
-// section sits at 0x41000.
-inline constexpr std::uint32_t kBoundaryNtdllTextSpan = 0x40000;
-inline constexpr std::uint32_t kBoundaryNtdllWeldDataRva = 0x41000;
 
 } // namespace sheller::loader
 

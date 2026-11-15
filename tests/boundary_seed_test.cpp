@@ -70,7 +70,7 @@ TEST(BoundarySeed, CommittedTableBindsTheFixtureImage)
     EXPECT_STREQ(ntdll.arch, "x64");
     ASSERT_EQ(ntdll.image_count, 1u);
     // tests/boundary_fixture.h: the self-made mechanism-corpus ntdll image
-    EXPECT_EQ(ntdll.images[0].xxhash64, 0x6c806f42b18c5f46ULL);
+    EXPECT_EQ(ntdll.images[0].xxhash64, 0x594c03e7cec6369aULL);
     ASSERT_EQ(ntdll.export_count, 8u);
     // spot the classification kinds the derive consumes
     EXPECT_EQ(ntdll.exports[0].kind, seed::kSeedSyscallStub);
@@ -83,7 +83,7 @@ TEST(BoundarySeed, CommittedTableBindsTheFixtureImage)
 
     // the two real builds keep their provenance notes describing the build
     ASSERT_EQ(seed::kModules[1].image_count, 1u);
-    EXPECT_EQ(seed::kModules[1].images[0].xxhash64, 0xde055585ba0729d4ULL);
+    EXPECT_EQ(seed::kModules[1].images[0].xxhash64, 0x10d75b5a36dbefafULL);
     ASSERT_EQ(seed::kModules[1].export_count, 2523u);
     ASSERT_EQ(seed::kModules[2].image_count, 1u);
     EXPECT_EQ(seed::kModules[2].images[0].xxhash64, 0xabfab64c572b14f7ULL);

@@ -23,6 +23,7 @@
 #include "../capture/pe_headers.h"
 #include "../capture/wrapper.h"
 
+#include <sheller/clock_policy.h>
 #include <sheller/snapshot.h>
 
 #include <algorithm>
@@ -447,9 +448,13 @@ serialize_guest(const PreparedGuest& guest, const snapshot::PendingModule* pendi
 
     std::ostringstream out;
     snapshot::Writer writer{out};
-    if (!writer.write_header(snapshot::Header{.version = pending != nullptr ? snapshot::kVersionV2
-                                                                            : snapshot::kVersion,
-                                              .bitness = snapshot::kBitness64})) {
+    // The engine production write path pins the default clock policy and
+    // writes v3 unconditionally - EXE, shellcode and DLL-input containers
+    // alike (the clock block rides after the optional pending block). Double
+    // construction therefore compares equal at v3, and the pinned policy is
+    // an engine constant, never a host measurement.
+    if (!writer.write_header(
+            snapshot::Header{.version = snapshot::kVersionV3, .bitness = snapshot::kBitness64})) {
         return std::unexpected(failure(RebuildError::kIoFailure));
     }
 
@@ -505,6 +510,9 @@ serialize_guest(const PreparedGuest& guest, const snapshot::PendingModule* pendi
     if (pending != nullptr && !writer.write_pending(*pending)) {
         return std::unexpected(failure(RebuildError::kIoFailure));
     }
+    if (!writer.write_clock(snapshot::default_clock_policy())) {
+        return std::unexpected(failure(RebuildError::kIoFailure));
+    }
     const std::string bytes = out.str();
     return std::vector<std::uint8_t>{bytes.begin(), bytes.end()};
 }
@@ -556,7 +564,8 @@ craft_dll_sample_container(const std::filesystem::path& pe_path,
         }
     }
     auto guest = prepare_pe_file(runner_path, fidelity_seams, synthetic_module_dir,
-                                 system_modules_dir, system_modules_fallback);
+                                 system_modules_dir, system_modules_fallback,
+                                 /*arrival_name=*/"sheller_run.exe", sample_bytes, arrival_name);
     std::error_code remove_ec;
     std::filesystem::remove(runner_path, remove_ec); // best effort: the world is built
     if (!guest) {

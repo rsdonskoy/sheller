@@ -2,7 +2,7 @@
   "schema": 1,
   "arch": "x64",
   "anchor": {
-    "xxhash64": "0x6c806f42b18c5f46",
+    "xxhash64": "0x594c03e7cec6369a",
     "note": "tests/boundary_fixture.h make_boundary_source(boundary_fixture_exports(false)) - the self-made mechanism-corpus ntdll the CI directory-mode tests map; re-pin when the fixture changes"
   },
   "entries": [

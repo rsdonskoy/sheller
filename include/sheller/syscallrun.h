@@ -1,5 +1,6 @@
 // sheller public engine-run header - syscall-enabled snapshot execution: the
-// engine rebuilds a v1 snapshot and runs it with the syscall skeleton
+// engine rebuilds a snapshot container (v1/v2/v3) and runs it with the
+// syscall skeleton
 // attached (policy table, default deny, three minimal handlers). Standard
 // library only: no unicorn or Windows headers may leak in here; the Unicorn
 // instance lives and dies inside the engine.

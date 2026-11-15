@@ -178,7 +178,7 @@ TEST(Capture, ProducesSnapshotFromSyntheticSample)
 
     const auto contents = read_snapshot(output);
     ASSERT_TRUE(contents);
-    EXPECT_EQ(contents->header.version, snapshot::kVersion);
+    EXPECT_EQ(contents->header.version, snapshot::kVersionV3); // production path pins the clock
     EXPECT_EQ(contents->header.bitness, snapshot::kBitness64);
     EXPECT_GT(contents->header.region_count, 0U);
 

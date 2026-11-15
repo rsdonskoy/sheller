@@ -2,8 +2,9 @@
 // run() drives the full pipeline: spawn the sample suspended
 // under the real Windows loader, patch its entry into an in-place spin, wait
 // for the loader to finish, then photograph the whole user-mode state into a
-// v1 snapshot file. Only the surface lives here; the pipeline itself is
-// Windows-only and refuses cleanly elsewhere.
+// snapshot container (v3, with the pinned clock policy). Only the surface
+// lives here; the pipeline itself is Windows-only and refuses cleanly
+// elsewhere.
 
 #ifndef SHELLER_CAPTURE_H
 #define SHELLER_CAPTURE_H
@@ -57,7 +58,7 @@ bool capture_available();
 
 SHELLER_API Result run(const Options& options);
 
-// Runs the capture and returns the v1 snapshot bytes instead of writing a
+// Runs the capture and returns the snapshot bytes instead of writing a
 // file - the one-shot unpack flow keeps the snapshot in memory.
 Result run_to_buffer(const Options& options, std::vector<std::uint8_t>& snapshot);
 

@@ -19,6 +19,7 @@
 #include "behavior_fact.h"
 #include "rebuild_probe.h"
 #include <sheller/capture.h>
+#include <sheller/clock_policy.h>
 #include <sheller/snapshot.h>
 
 #include <algorithm>
@@ -697,6 +698,13 @@ TEST(UnknownImage, SynthesizedImageEventsResponsesAndEhFace)
                 EXPECT_TRUE(writer.write_region(region.header, content).has_value());
             }
             EXPECT_TRUE(writer.finalize_region_count().has_value());
+            // A capture rewritten at its own version: v3 carries the clock
+            // block (the engine's pinned policy - the fixture's sample world
+            // does not run long enough to read it, but the loader requires
+            // it).
+            if (out_header.version == snapshot::kVersionV3) {
+                EXPECT_TRUE(writer.write_clock(snapshot::default_clock_policy()).has_value());
+            }
         }
         return crafted_path;
     };

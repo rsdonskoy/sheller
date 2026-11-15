@@ -226,10 +226,11 @@ TEST_F(SyscallNumberMap, OpenEventAnswersDeterministicHandle)
     EXPECT_EQ(handle, 0x5ECB0001U);
 }
 
-// NtQueryPerformanceCounter answers deterministic
-// zeros into both out-parameters (the replay's clock never advances) and
-// stays fail-soft on an unwritable counter pointer.
-TEST_F(SyscallNumberMap, QueryPerformanceCounterAnswersDeterministicZeros)
+// NtQueryPerformanceCounter: the syscalls layer parses the request only -
+// the counter answer comes from the engine's virtual clock (the engine-side
+// apply pins the derived counter and the nonzero policy frequency; see the
+// virtual_clock_test binary).
+TEST_F(SyscallNumberMap, QueryPerformanceCounterParsesForTheEngineClock)
 {
     ASSERT_EQ(uc_mem_map(uc_, 0x7FF900000000, 0x10000, UC_PROT_ALL), UC_ERR_OK);
     constexpr std::uint64_t kCounterPtr = 0x7FF900000800;
@@ -240,29 +241,23 @@ TEST_F(SyscallNumberMap, QueryPerformanceCounterAnswersDeterministicZeros)
     frame.number = 0x1234;
     frame.rcx = kCounterPtr;
     frame.rdx = kFreqPtr;
+    // uc_mem_map hands out zeroed pages: write a canary so "the parse wrote
+    // nothing" is observable.
+    const std::uint64_t canary = 0x5A5A;
+    ASSERT_EQ(uc_mem_write(uc_, kCounterPtr, &canary, sizeof canary), UC_ERR_OK);
+    ASSERT_EQ(uc_mem_write(uc_, kFreqPtr, &canary, sizeof canary), UC_ERR_OK);
     const syscalls::WriteSink null_sink{};
     const auto outcome = syscalls::dispatch_syscall(table, uc_, frame, null_sink);
     EXPECT_EQ(outcome.status, syscalls::kStatusSuccess);
-    std::uint64_t value = 0;
+    EXPECT_TRUE(outcome.query_performance);
+    EXPECT_EQ(outcome.qpc_counter_ptr, kCounterPtr);
+    EXPECT_EQ(outcome.qpc_frequency_ptr, kFreqPtr);
+    // The parse writes nothing: the engine apply owns both out-parameters.
+    std::uint64_t value = 0x5A5A;
     ASSERT_EQ(uc_mem_read(uc_, kCounterPtr, &value, sizeof value), UC_ERR_OK);
-    EXPECT_EQ(value, 0U);
+    EXPECT_EQ(value, 0x5A5AU);
     ASSERT_EQ(uc_mem_read(uc_, kFreqPtr, &value, sizeof value), UC_ERR_OK);
-    EXPECT_EQ(value, 0U);
-}
-
-TEST_F(SyscallNumberMap, QueryPerformanceCounterFailSoftOnUnwritableCounter)
-{
-    syscalls::PolicyTable table;
-    table.set_builtin(0x1234, syscalls::BuiltinHandler::kQueryPerformanceCounter);
-    syscalls::SyscallFrame frame{};
-    frame.number = 0x1234;
-    frame.rcx = 0x7FF800000000; // mapped but the stub area read-only? UC_PROT_ALL
-                                // here: use an unmapped page instead
-    frame.rcx = 0x5FF900000000; // unmapped
-    frame.rdx = 0;
-    const syscalls::WriteSink null_sink{};
-    const auto outcome = syscalls::dispatch_syscall(table, uc_, frame, null_sink);
-    EXPECT_EQ(outcome.status, syscalls::kStatusAccessViolation);
+    EXPECT_EQ(value, 0x5A5AU);
 }
 
 // The AppPolicy preamble's thread-token open: the desktop answer for a plain

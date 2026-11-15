@@ -474,10 +474,12 @@ sheller_apply_common(registry_intercept_e2e_test)
 add_test(NAME registry_intercept_e2e COMMAND registry_intercept_e2e_test)
 
 # Memory region map: PE32+ section-table parse + three-tier
-# attribution queries, portable by design.
+# attribution queries, portable by design. New test cases that touch the
+# Ldr-walk fold need the unicorn include above (the one real-instance case).
 add_executable(mem_region_map_test mem_region_map_test.cpp)
 target_include_directories(mem_region_map_test PRIVATE
   "${CMAKE_CURRENT_SOURCE_DIR}/../src/engine")
+target_include_directories(mem_region_map_test SYSTEM PRIVATE ${SHELLER_UNICORN_INCLUDE_DIR})
 target_link_libraries(mem_region_map_test PRIVATE GTest::gtest_main sheller_engine)
 sheller_apply_common(mem_region_map_test)
 
@@ -544,6 +546,44 @@ target_link_libraries(run_plan_test PRIVATE GTest::gtest_main sheller_engine)
 sheller_apply_common(run_plan_test)
 
 add_test(NAME run_plan COMMAND run_plan_test)
+
+# Boundary-trap dispatch: the sorted stable-deduplicated VA index and the
+# trap-owning module selection, over hand-built tables - portable by design,
+# no unicorn and no guest memory. The trap stop itself is pinned end to end in
+# loader_directory_test.
+add_executable(boundary_dispatch_test boundary_dispatch_test.cpp)
+target_include_directories(boundary_dispatch_test PRIVATE
+  "${CMAKE_CURRENT_SOURCE_DIR}/../src/engine")
+target_include_directories(boundary_dispatch_test SYSTEM PRIVATE
+  ${SHELLER_UNICORN_INCLUDE_DIR})
+target_link_libraries(boundary_dispatch_test PRIVATE GTest::gtest_main sheller_engine)
+sheller_apply_common(boundary_dispatch_test)
+
+add_test(NAME boundary_dispatch COMMAND boundary_dispatch_test)
+
+# Intercept span dispatch: the dispatch index and the span/solo registration
+# split, over hand-built tables (no unicorn, no corpus).
+add_executable(intercept_span_dispatch_test intercept_span_dispatch_test.cpp)
+target_include_directories(intercept_span_dispatch_test PRIVATE
+  "${CMAKE_CURRENT_SOURCE_DIR}/../src/engine")
+target_include_directories(intercept_span_dispatch_test SYSTEM PRIVATE
+  ${SHELLER_UNICORN_INCLUDE_DIR})
+target_link_libraries(intercept_span_dispatch_test PRIVATE GTest::gtest_main sheller_engine)
+sheller_apply_common(intercept_span_dispatch_test)
+
+add_test(NAME intercept_span_dispatch COMMAND intercept_span_dispatch_test)
+
+# The intercept callback's two branches (miss no-op, hit dispatch) against a
+# live engine instance.
+add_executable(intercept_callback_test intercept_callback_test.cpp)
+target_include_directories(intercept_callback_test PRIVATE
+  "${CMAKE_CURRENT_SOURCE_DIR}/../src/engine")
+target_include_directories(intercept_callback_test SYSTEM PRIVATE
+  ${SHELLER_UNICORN_INCLUDE_DIR})
+target_link_libraries(intercept_callback_test PRIVATE GTest::gtest_main sheller_engine)
+sheller_apply_common(intercept_callback_test)
+
+add_test(NAME intercept_callback COMMAND intercept_callback_test)
 
 # Synthetic DLL load transactions: no host process or system DLL fixtures.
 add_executable(dll_loader_test dll_loader_test.cpp)
@@ -921,6 +961,12 @@ endif()
   add_test(NAME world_diff_regression
     COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/world_diff_regression.py")
 
+  # Equivalence-baseline machine adjudication (accepted-residuals gate):
+  # the happy path, unaccepted classes, scale-cap overruns and structural
+  # shape anchors (negative cases). Portable by design.
+  add_test(NAME accept_residuals
+    COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/accept_residuals_test.py")
+
   # Linux packed e2e: the packed.exe snapshot (captured on a Windows
   # host) is replayed on the Linux engine, the dump is repaired and the .unp
   # is produced. Skips when the snapshot file has not been transferred.
@@ -1234,6 +1280,21 @@ sheller_apply_common(boundary_derive_test)
 
 add_test(NAME boundary_derive COMMAND boundary_derive_test)
 
+# Eager delayed-import binding: the construction-time policy over
+# DataDirectory[13] - RVA-form descriptors bind their IAT slots to the
+# final resolved VAs and nothing else (the capture corpus's .didat
+# records), VA-form and out-of-range descriptors are the named rejection,
+# name/ordinal/forwarder thunks resolve, missing delayed dependencies are
+# recorded, and the closure walk (write=false) never writes. Portable by
+# design.
+add_executable(delay_imports_test delay_imports_test.cpp)
+target_include_directories(delay_imports_test PRIVATE
+  "${CMAKE_CURRENT_SOURCE_DIR}/../src/loader")
+target_link_libraries(delay_imports_test PRIVATE GTest::gtest_main sheller_engine)
+sheller_apply_common(delay_imports_test)
+
+add_test(NAME delay_imports COMMAND delay_imports_test)
+
 add_executable(loader_pe_e2e_test loader_pe_e2e_test.cpp)
 target_compile_definitions(loader_pe_e2e_test PRIVATE
   SYNTH_MODULE_DIR="${CMAKE_BINARY_DIR}/synth_modules")
@@ -1523,6 +1584,20 @@ add_test(NAME engine_trace_quiet COMMAND engine_trace_test
 # did not run, so a filter that stops matching cannot read as a green test.
 add_test(NAME engine_trace_nosink COMMAND engine_trace_test --traces-on --no-sink
          "--gtest_filter=EngineTraceNoSink.*")
+
+# The deterministic virtual clock: pure functions on the run state, the KUSER
+# threshold publication, the derived QPC answer, the CPUID time leaves, the
+# rate-ratio closure, the default policy for clock-less containers, and the
+# leg-layout independence pin over the rdtsc answer trace (the TU's main()
+# sets SHELLER_RDTSC_TRACE before anything caches it). Portable: crafted
+# snapshots only.
+add_executable(virtual_clock_test virtual_clock_test.cpp)
+target_include_directories(virtual_clock_test PRIVATE
+  "${CMAKE_CURRENT_SOURCE_DIR}/../src/engine"
+  "${CMAKE_CURRENT_SOURCE_DIR}/../src/syscalls")
+target_link_libraries(virtual_clock_test PRIVATE GTest::gtest sheller_engine)
+sheller_apply_common(virtual_clock_test)
+add_test(NAME virtual_clock COMMAND virtual_clock_test)
 
 # Static-side concurrency: four threads inside the analysis and unpack
 # entries at once, over the static core. Portable by design - the analysis half drives

@@ -140,6 +140,7 @@ class Image:
         self.forwarders = {}           # slot name -> "module.function" target
         self.thunk_targets = {}        # slot name -> "module.function" (jmp [rip] IAT thunk)
         self.contract_imports = {}     # contract -> set of function names
+        self.delay_contracts = set()   # contracts observed via the delay directory
         self.ordinal_import_skips = 0
         self._thunk_slot_rvas = {}     # slot name -> IAT slot RVA the thunk jumps through
         self._iat_slot_map = {}        # first-thunk slot RVA -> (dll, import name)
@@ -292,7 +293,7 @@ class Image:
             return
         while True:
             fields = struct.unpack_from("<8I", data, off)
-            name_rva, iat_rva, int_rva = fields[1], fields[3], fields[4]
+            gr_attrs, name_rva, iat_rva, int_rva = fields[0], fields[1], fields[3], fields[4]
             if name_rva == 0:
                 break
             name_off = self.rva2off(name_rva)
@@ -301,6 +302,29 @@ class Image:
             dll = data[name_off:data.index(b"\0", name_off)].decode(
                 "ascii", errors="replace").lower()
             self._record_iat_slots(dll, int_rva, iat_rva)
+            # a delay-descriptor contract joins the observations like a
+            # normal import: the eager binding resolves it through the map,
+            # so the map must cover what the resident modules delay-import
+            base = dll[:-4] if dll.endswith(".dll") else dll
+            if (gr_attrs & 1) and (base.startswith("api-ms-") or base.startswith("ext-ms-")):
+                self.delay_contracts.add(base)
+                functions = self.contract_imports.setdefault(base, set())
+                arr_off = self.rva2off(int_rva or iat_rva)
+                if arr_off is not None:
+                    j = 0
+                    while True:
+                        value = struct.unpack_from("<Q", data, arr_off + j * 8)[0]
+                        if value == 0:
+                            break
+                        if (value >> 63) & 1:
+                            self.ordinal_import_skips += 1
+                        else:
+                            foff = self.rva2off(value & 0x7FFFFFFF)
+                            if foff is not None:
+                                fname = data[foff + 2:data.index(b"\0", foff + 2)].decode(
+                                    "ascii", errors="replace").lower()
+                                functions.add(fname)
+                        j += 1
             off += 32
 
     def _parse_imports(self):
@@ -326,6 +350,7 @@ class Image:
             # through the FirstThunk (ft) slots - keys must be ft addresses
             self._record_iat_slots(dll, oft, ft)
             if base.startswith("api-ms-") or base.startswith("ext-ms-"):
+                self.delay_contracts.discard(base)
                 functions = self.contract_imports.setdefault(base, set())
                 j = 0
                 while True:
@@ -447,9 +472,31 @@ def main():
                 "target": target,
                 "status": forward_target_status(target, images_by_name),
             }
+    # Delay-only contracts whose every observed function name is absent
+    # from every scanned host are not map requirements: the eager binding
+    # tolerates them with the file's own static failure thunks (the capture
+    # corpus's records - those slots ride the file bytes in the captured
+    # world too). Normal-import contracts stay required.
+    delay_only = set()
+    normal_contracts = set()
+    for importer, img in importers:
+        delay_only |= img.delay_contracts
+        normal_contracts |= set(img.contract_imports) - img.delay_contracts
+    tolerated = []
+    for contract in sorted(delay_only - normal_contracts):
+        if contract not in observations:
+            continue
+        union = {fn for fns in observations[contract].values() for fn in fns}
+        if all(fn_status(fn, img) == "absent"
+               for img in list(images.values()) + extra for fn in union):
+            tolerated.append(contract)
+    for contract in tolerated:
+        observations.pop(contract)
+
     contracts_out = {}
     entries = {}
     unresolved = []
+    tolerated_contracts = tolerated
 
     def unusable_functions(host, functions):
         # Confirmation establishes host identity, never bypasses reachability.
@@ -626,6 +673,7 @@ def main():
             imp: img.ordinal_import_skips for imp, img in importers},
         "forwarders": forward_status,
         "thunk_targets": display_thunks,
+        "static_thunk_tolerated_contracts": tolerated_contracts,
         "contracts": contracts_out,
     }
     evidence_path = Path(args.evidence)

@@ -4,8 +4,8 @@
  "arch": "x64",
  "images": [
   {
-   "xxhash64": "0xde055585ba0729d4",
-   "note": "real Windows build from C:\\Windows\\System32\\ntdll.dll"
+   "xxhash64": "0x10d75b5a36dbefaf",
+   "note": "real Windows build from C:\\Windows\\System32\\ntdll.dll (2026-11-11 patch level; the pre-patch image this entry previously pinned no longer exists on the host)"
   }
  ],
  "exports": [

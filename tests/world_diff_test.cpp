@@ -67,7 +67,9 @@ constexpr std::uint64_t kCapTeb = 0x7FF9E0000000;
 constexpr std::uint64_t kCapImageBase = 0x140000000;
 constexpr std::uint64_t kCapStack = 0x7FF9F0000000;
 
-// Crafted-world constants: the engine's env-block layout, narrow ASCII names.
+// Crafted-world constants: the env-block layout, narrow ASCII names - the
+// container shape built before the shared UTF-16 name convention, which the
+// diff must keep reading.
 constexpr std::uint64_t kCraNtdll = 0x7FFEE0000000;
 constexpr std::uint64_t kCraK32 = 0x7FFEE0010000;
 constexpr std::uint64_t kCraW32u = 0x7FFEE0020000;
@@ -174,8 +176,9 @@ struct LdrModule {
 // The engine's Ldr area (env.cpp layout): three closed chains with heads at
 // +0x10/0x20/0x30, entries at +0x58+i*0x100, DllBase@+0x30, SizeOfImage@+0x40,
 // BaseDllName UNICODE_STRING@+0x58 aliasing the name bytes at block+0x80.
-// narrow=true spells names as ASCII with byte-count Length (the synthetic
-// environment shape); narrow=false spells UTF-16LE (real capture shape).
+// narrow=true spells names as ASCII with byte-count Length (the legacy
+// container shape); narrow=false spells UTF-16LE (the current engine shape
+// and every real capture).
 std::vector<std::uint8_t> build_ldr_area(std::uint64_t area_va,
                                          const std::vector<LdrModule>& modules, bool narrow)
 {
@@ -559,8 +562,8 @@ TEST(WorldDiff, AlignClassifiesEveryCauseClass)
               {"domain": "infrastructure", "classification": "expected-volatile", "target": "kusd.tick_count"},
               {"domain": "infrastructure", "classification": "expected-volatile", "target": "kusd.interrupt_time"},
               {"domain": "infrastructure", "classification": "candidate", "target": "kusd.nt_system_root", "capture": "c:\\windows"},
-              {"domain": "infrastructure", "classification": "candidate", "target": "ldr.load", "detail": "count capture=8 crafted=9"},
-              {"domain": "infrastructure", "classification": "candidate", "target": "ldr.load", "detail": "order differs at index 1: capture=kernel32.dll crafted=win32u.dll"},
+              {"domain": "infrastructure", "classification": "expected", "target": "ldr.load", "detail": "membership: wmi.dll present on crafted only"},
+              {"domain": "infrastructure", "classification": "candidate", "target": "ldr.load", "detail": "order differs at common index 1: capture=kernel32.dll crafted=win32u.dll"},
               {"domain": "infrastructure", "classification": "candidate", "target": "peb.process_heap"}
             ])",
                                                             R"([
@@ -665,8 +668,75 @@ TEST(WorldDiff, ReaderRefusalsAreNamed)
     }
     {
         auto copy = bytes;
-        put_u32(copy, 8, 3);
+        put_u32(copy, 8, 4); // beyond v3: version 3 is a legal container now
         refusals.push_back({"bad_version.snap", copy, "kUnsupportedVersion", false});
+    }
+    {
+        // A v3 container whose clock block declares a foreign payload
+        // length: the harness skips the v3 trailing blocks, and a broken
+        // clock block is still a named refusal - never a silent tail.
+        auto copy = bytes;
+        put_u32(copy, 8, 3);
+        const std::string marker = "CLKPOLICY1";
+        copy.insert(copy.end(), marker.begin(), marker.end());
+        copy.push_back(1); // policy version 1
+        copy.resize(copy.size() + 3);
+        copy.push_back(73); // payload length != 72
+        copy.resize(copy.size() + 3);
+        copy.resize(copy.size() + 73);
+        refusals.push_back({"bad_clock.snap", copy, "kBadClock", false});
+    }
+    for (const int flavor : {0, 1, 2, 3}) {
+        // The rest of the v3 clock validation: foreign policy version, an
+        // engine-unsafe policy (zero blocks_per_tick), a payload cut short,
+        // and a duplicated clock block - each a named refusal, each
+        // mirrored by the engine reader's classification.
+        auto copy = bytes;
+        put_u32(copy, 8, 3);
+        const std::string marker = "CLKPOLICY1";
+        const auto append_u32 = [&copy](const std::uint32_t value) {
+            for (int i = 0; i < 4; ++i) {
+                copy.push_back(static_cast<std::uint8_t>(value >> (8 * i)));
+            }
+        };
+        const auto append_u64 = [&copy](const std::uint64_t value) {
+            for (int i = 0; i < 8; ++i) {
+                copy.push_back(static_cast<std::uint8_t>(value >> (8 * i)));
+            }
+        };
+        const auto append_clock = [&](const std::uint32_t policy_version,
+                                      const std::uint64_t blocks_per_tick) {
+            copy.insert(copy.end(), marker.begin(), marker.end());
+            append_u32(policy_version);
+            append_u32(72);
+            append_u64(0x218711A700ULL); // base_tsc
+            append_u64(150000);          // tsc_per_block
+            append_u64(blocks_per_tick);
+            append_u64(10000000);  // qpc_frequency
+            append_u64(600000000); // base_qpc
+            append_u64(625);       // qpc_per_block
+            for (int i = 0; i < 6; ++i) {
+                append_u32(1); // both CPUID triples: any nonzero placeholder
+            }
+        };
+        const auto truncate = [&copy](const std::size_t keep) {
+            copy.resize(copy.size() - 90 + keep);
+        };
+        if (flavor == 0) {
+            append_clock(2, 16); // foreign policy version
+            refusals.push_back({"clock_version2.snap", copy, "kBadClock", false});
+        } else if (flavor == 1) {
+            append_clock(1, 0); // engine-unsafe: blocks_per_tick = 0
+            refusals.push_back({"clock_zero_bpt.snap", copy, "kBadClock", false});
+        } else if (flavor == 2) {
+            append_clock(1, 16);
+            truncate(80); // payload cut short
+            refusals.push_back({"clock_truncated.snap", copy, "kTruncated", false});
+        } else {
+            append_clock(1, 16);
+            append_clock(1, 16); // duplicated block: trailing bytes
+            refusals.push_back({"clock_duplicated.snap", copy, "kBadClock", false});
+        }
     }
     {
         auto copy = bytes;

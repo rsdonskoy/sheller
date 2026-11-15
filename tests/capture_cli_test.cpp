@@ -68,7 +68,7 @@ TEST(CaptureCli, ProducesSnapshotOnWindows)
     sheller::snapshot::Reader reader{in};
     const auto header = reader.read_header();
     ASSERT_TRUE(header.has_value());
-    EXPECT_EQ(header->version, sheller::snapshot::kVersion);
+    EXPECT_EQ(header->version, sheller::snapshot::kVersionV3); // production path pins the clock
     EXPECT_EQ(header->bitness, sheller::snapshot::kBitness64);
 }
 

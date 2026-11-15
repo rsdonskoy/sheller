@@ -18,6 +18,7 @@
 #include <thread>
 
 #include <sheller/capture.h>
+#include <sheller/clock_policy.h>
 #include <sheller/snapshot.h>
 
 #include <windows.h>
@@ -579,11 +580,13 @@ std::expected<void, Result> wait_for_entry_spin(SpawnedSample& sample,
 }
 
 // Phase 3: photograph registers, TEB and all committed regions into the
-// writer; returns the summary line for the CLI. A non-null pending module
-// (the DLL-input route) switches the container to v2.
+// writer; returns the summary line for the CLI. The pending module (the
+// DLL-input route) rides into the trailing block area by the caller; the
+// header is v3 either way (the clock block is unconditional).
 std::expected<std::string, Result> capture_state(SpawnedSample& sample, snapshot::Writer& writer,
                                                  const snapshot::PendingModule* pending = nullptr)
 {
+    static_cast<void>(pending);
     // Register photograph follows the sampled world: WOW64 threads give
     // their 32-bit context only through the Wow64 API pair (the 64-bit
     // CONTEXT of the same thread describes the host-mode half).
@@ -673,9 +676,12 @@ std::expected<std::string, Result> capture_state(SpawnedSample& sample, snapshot
         return fail(Status::kWriteFailed, std::string(snapshot::error_message(error)));
     };
     const auto snapshot_bitness = sample.is_wow64 ? snapshot::kBitness32 : snapshot::kBitness64;
-    if (const auto written = writer.write_header(snapshot::Header{
-            .version = pending != nullptr ? snapshot::kVersionV2 : snapshot::kVersion,
-            .bitness = snapshot_bitness});
+    // The engine production write path pins the default clock policy and
+    // writes v3 unconditionally - EXE and DLL-input containers alike (the
+    // clock block rides after the optional pending block). The clock is an
+    // engine constant, never a host measurement.
+    if (const auto written = writer.write_header(
+            snapshot::Header{.version = snapshot::kVersionV3, .bitness = snapshot_bitness});
         !written) {
         return std::unexpected(write_fail(written.error()));
     }
@@ -984,6 +990,9 @@ Result run_impl(const Options& options)
                         std::string(snapshot::error_message(written.error())));
         }
     }
+    if (const auto written = writer.write_clock(snapshot::default_clock_policy()); !written) {
+        return fail(Status::kWriteFailed, std::string(snapshot::error_message(written.error())));
+    }
     out.flush();
     if (!out) {
         return fail(Status::kWriteFailed, "cannot flush the snapshot file");
@@ -1025,6 +1034,9 @@ Result run_to_buffer(const Options& options, std::vector<std::uint8_t>& snapshot
             return fail(Status::kWriteFailed,
                         std::string(snapshot::error_message(written.error())));
         }
+    }
+    if (const auto written = writer.write_clock(snapshot::default_clock_policy()); !written) {
+        return fail(Status::kWriteFailed, std::string(snapshot::error_message(written.error())));
     }
     const std::string bytes = out.str();
     snapshot.assign(bytes.begin(), bytes.end());

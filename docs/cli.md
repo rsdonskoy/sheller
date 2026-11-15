@@ -412,11 +412,21 @@ corpus, and a micro-benchmark gate holds the full syscall chain under a 10 us/ca
 red line.
 
 Diagnostic traces (`SHELLER_SEH_TRACE`, `SHELLER_LOOP_GATE_TRACE`,
-`SHELLER_FILE_TRACE`) are `kDebug` log records, rendered only when their site switch
-is set *and* the host's sink threshold takes them; they reach the sink the host
-installed. The shipped CLI is one such host: its sink writes through spdlog, with the
-level decoration on standard output, and its threshold is `warn` unless you say
-otherwise - so setting a variable alone changes nothing.
+`SHELLER_FILE_TRACE`, `SHELLER_HOOK_TRACE`) are `kDebug` log records, rendered only
+when their site switch is set *and* the host's sink threshold takes them; they reach
+the sink the host installed. The shipped CLI is one such host: its sink writes through
+spdlog, with the level decoration on standard output, and its threshold is `warn`
+unless you say otherwise - so setting a variable alone changes nothing.
+`SHELLER_HOOK_TRACE` prints the code-hook registration inventory once per run: the
+trap/stub half at apply time (`[hookinv] traps=N unique=N spans=N stubmods=N`, then
+one line per registered span) and the intercept/window half at hook registration
+(`[hookinv] code: diag=N behavior=N intercepts=N spans=N solo=N unwind=N`, where
+`intercepts` is the intercept table length and `spans + solo` is the hook count that
+half registers for it: one span per intercept-owning module plus one individual hook
+per row the spans fail to cover). The trap span count on the first line and the
+intercept span and solo counts on the second sum - with the windows and the budget's
+own count hook - to the chain unicorn scans for every covered instruction, which is
+what makes a registration-form change measurable without a probe build.
 
 ```bash
 SHELLER_LOOP_GATE_TRACE=1 sheller run sample.snap --from-snapshot --log-level debug
@@ -426,7 +436,7 @@ SHELLER_LOOP_GATE_TRACE=1 sheller run sample.snap --from-snapshot --log-level de
 that run puts the loop-gate summary in the CLI's output, and the same run at the
 default level does not. A library that installed no sink hears nothing either way. The
 observable event stream is untouched by any of this: the committed baselines
-reproduce byte for byte with all three switches set and the records rendered. The one
+reproduce byte for byte with all four switches set and the records rendered. The one
 ungated exception is the unhandled-crash line, a `kWarning` record, because an
 operator needs it without asking for diagnostics.
 

@@ -11,6 +11,7 @@
 #include <cstdint>
 #include <expected>
 #include <iosfwd>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -26,6 +27,11 @@ inline constexpr std::uint32_t kVersion = 1;
 // refusal channel (a v1 reader stops after region_count regions and would
 // silently ignore trailing bytes otherwise).
 inline constexpr std::uint32_t kVersionV2 = 2;
+// v3 = v2 layout plus one trailing clock-policy block (the deterministic
+// virtual clock's container-pinned strategy). Older readers reject v3 through
+// the same unknown-version channel v1 rejects v2; the new reader accepts
+// v1/v2/v3 and only v3 may carry the clock block.
+inline constexpr std::uint32_t kVersionV3 = 3;
 inline constexpr std::uint8_t kBitness64 = 64;
 inline constexpr std::uint8_t kBitness32 = 32;
 
@@ -68,6 +74,36 @@ inline constexpr std::size_t kPendingNameOffset = kPendingNameLenOffset + sizeof
 // corpus sits far below them.
 inline constexpr std::uint32_t kMaxPendingNameBytes = 260;
 inline constexpr std::uint64_t kMaxPendingModuleBytes = 64ull * 1024 * 1024;
+
+// v3 trailing clock-policy block: marker | policy_version (u32) |
+// payload_len (u32) | base_tsc (u64) | tsc_per_block (u64) |
+// blocks_per_tick (u64) | qpc_frequency (u64) | base_qpc (u64) |
+// qpc_per_block (u64) | cpuid_0x15 (3 x u32) | cpuid_0x16 (3 x u32).
+// Field-level little-endian, like every other block. A v3 file carries
+// exactly one clock block, after the optional pending block; v1/v2 files
+// never carry one. The payload length covers everything after it, so a
+// future policy version appending fields is caught by the length check
+// instead of silently shifted reads.
+inline constexpr std::uint8_t kClockMarker[10] = {'C', 'L', 'K', 'P', 'O', 'L', 'I', 'C', 'Y', '1'};
+inline constexpr std::size_t kClockVersionOffset = sizeof kClockMarker;
+inline constexpr std::size_t kClockPayloadLenOffset = kClockVersionOffset + sizeof(std::uint32_t);
+inline constexpr std::size_t kClockBaseTscOffset = kClockPayloadLenOffset + sizeof(std::uint32_t);
+inline constexpr std::size_t kClockTscPerBlockOffset = kClockBaseTscOffset + sizeof(std::uint64_t);
+inline constexpr std::size_t kClockBlocksPerTickOffset =
+    kClockTscPerBlockOffset + sizeof(std::uint64_t);
+inline constexpr std::size_t kClockQpcFrequencyOffset =
+    kClockBlocksPerTickOffset + sizeof(std::uint64_t);
+inline constexpr std::size_t kClockBaseQpcOffset = kClockQpcFrequencyOffset + sizeof(std::uint64_t);
+inline constexpr std::size_t kClockQpcPerBlockOffset = kClockBaseQpcOffset + sizeof(std::uint64_t);
+inline constexpr std::size_t kClockCpuid0x15Offset =
+    kClockQpcPerBlockOffset + sizeof(std::uint64_t);
+inline constexpr std::size_t kClockCpuid0x16Offset =
+    kClockCpuid0x15Offset + 3 * sizeof(std::uint32_t);
+inline constexpr std::size_t kClockBlockSize = kClockCpuid0x16Offset + 3 * sizeof(std::uint32_t);
+// The payload length a well-formed clock block declares: everything the
+// marker/version/prefix does not cover.
+inline constexpr std::uint32_t kClockPayloadSize =
+    static_cast<std::uint32_t>(kClockBlockSize - kClockBaseTscOffset);
 
 // Canonical x64 GPR order: rax rcx rdx rbx rsp rbp rsi rdi r8..r15.
 enum class Gpr : std::uint8_t {
@@ -162,6 +198,28 @@ struct PendingModule {
     friend constexpr bool operator==(const PendingModule&, const PendingModule&) = default;
 };
 
+// The deterministic virtual clock's strategy, carried in the v3 container's
+// trailing clock block. Format type only: every guest-visible clock source is
+// a pure function of the executed block count under this policy (TSC =
+// base_tsc + tsc_per_block * blocks, TickCount = blocks / blocks_per_tick,
+// QPC counter = base_qpc + qpc_per_block * blocks at qpc_frequency, CPUID
+// time leaves pinned). The engine's numeric defaults live in
+// <sheller/clock_policy.h> - this header carries no values.
+struct ClockPolicy {
+    std::uint32_t policy_version{};
+    std::uint64_t base_tsc{};
+    std::uint64_t tsc_per_block{};
+    std::uint64_t blocks_per_tick{};
+    std::uint64_t qpc_frequency{};
+    std::uint64_t base_qpc{};
+    std::uint64_t qpc_per_block{};
+    // CPUID leaf 0x15 (EAX, EBX, ECX) and leaf 0x16 (EAX, EBX, ECX) answers.
+    std::array<std::uint32_t, 3> cpuid_0x15{};
+    std::array<std::uint32_t, 3> cpuid_0x16{};
+
+    friend constexpr bool operator==(const ClockPolicy&, const ClockPolicy&) = default;
+};
+
 enum class Error {
     kNone = 0,
     kIoFailure,          // stream write/read failure
@@ -171,6 +229,7 @@ enum class Error {
     kTruncated,          // stream ended inside a block or payload
     kBadContent,         // content flag is neither absent nor present
     kBadPending,         // pending-module block invalid or out of place
+    kBadClock,           // clock-policy block invalid, out of place, or repeated
 };
 
 std::string_view error_message(Error error);
@@ -191,17 +250,24 @@ class Writer {
     // Patches the header's region_count with the number of write_region
     // calls, so the producer can stream without counting regions up front.
     std::expected<void, Error> finalize_region_count();
-    // Appends the pending-module block. Only valid on a header written with
-    // kVersionV2 (a v1 file must keep its exact legacy layout); call once,
-    // after finalize_region_count.
+    // Appends the pending-module block. Valid on a header written with
+    // kVersionV2 or kVersionV3 (a v1 file must keep its exact legacy
+    // layout); call once, after finalize_region_count. On v3 the clock block
+    // follows (trailing block order: pending, then clock).
     std::expected<void, Error> write_pending(const PendingModule& pending);
+    // Appends the clock-policy block. Only valid on a header written with
+    // kVersionV3 (v1/v2 files keep their exact legacy layouts); call once,
+    // after finalize_region_count and - on the engine's production paths -
+    // after write_pending (trailing block order: pending, then clock).
+    std::expected<void, Error> write_clock(const ClockPolicy& clock);
 
   private:
     std::expected<void, Error> write_bytes(const void* data, std::size_t size);
 
     std::ostream& out_;
     std::uint32_t region_count_{};
-    std::uint32_t header_version_{kVersion}; // write_pending requires kVersionV2
+    std::uint32_t header_version_{kVersion}; // write_pending: v2/v3, write_clock: v3
+    bool clock_written_{false};              // write_clock is once-per-file
 };
 
 class Reader {
@@ -209,24 +275,44 @@ class Reader {
     explicit Reader(std::istream& in);
 
     // Validates magic, version and bitness per the format contract. Accepts
-    // both v1 and v2; anything else is kUnsupportedVersion (the v1 reader's
-    // designed refusal channel for v2 files).
+    // v1, v2 and v3; anything else is kUnsupportedVersion (the older reader's
+    // designed refusal channel for newer files).
     std::expected<Header, Error> read_header();
     std::expected<Registers, Error> read_registers();
     std::expected<Metadata, Error> read_metadata();
     std::expected<Region, Error> read_region();
     // Reads the trailing pending-module block. v2 files must carry exactly
     // one: a second call, or the first call on a v1 file, is kBadPending; a
-    // v2 file that ends before the block is kTruncated.
+    // v2 file that ends before the block is kTruncated. On a v3 file the
+    // block is optional: absence is kBadPending with the stream left
+    // untouched, so a clock read can follow; a present-but-malformed block
+    // fails with whatever error its bytes produce.
     std::expected<PendingModule, Error> read_pending();
+    // The v3 caller's spelling of the same block: distinguishes "absent"
+    // (nullopt, nothing consumed - the next bytes open the clock block)
+    // from "present". A first byte that opens a pending-like block commits
+    // to a full strict parse: any malformed byte is a named error, never a
+    // silent fall-through to the clock block.
+    std::expected<std::optional<PendingModule>, Error> read_pending_optional();
+    // Reads the trailing clock-policy block. v3 files must carry exactly
+    // one: a second call, or the first call on a v1/v2 file, is kBadClock; a
+    // v3 file that ends inside the block is kTruncated; a marker/version/
+    // payload mismatch or an engine-unsafe policy (zero blocks_per_tick or
+    // zero qpc_frequency) is kBadClock.
+    std::expected<ClockPolicy, Error> read_clock();
 
   private:
     Error read_bytes(void* data, std::size_t size);
+    // The strict pending parse shared by read_pending and
+    // read_pending_optional: caller has gated header/once and committed to a
+    // pending-like first byte.
+    std::expected<PendingModule, Error> parse_pending_block();
 
     std::istream& in_;
     std::uint8_t header_bitness{kBitness64}; // captured from read_header
     std::uint32_t header_version{kVersion};  // captured from read_header
     bool pending_read_{false};
+    bool clock_read_{false};
 };
 
 } // namespace sheller::snapshot

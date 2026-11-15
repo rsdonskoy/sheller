@@ -11,12 +11,14 @@ namespace sheller::capture {
 namespace {
 
 // The arrival name becomes the runner's path string and the emulated Ldr
-// entry's BaseDllName (bounded to 64 chars there) - enforce one bound at the
-// source. Non-ASCII is rejected honestly rather than through a lossy widening
-// the engine cannot round-trip.
+// entry's BaseDllName. Static entry names are UTF-16 with a u16 NUL, so the
+// +0x80 name buffer holds at most 63 chars (2*63+2 = 0x80) - enforce that
+// bound here at the earliest gate instead of letting a 64-char name reach
+// name-construction time and fail there. Non-ASCII is rejected honestly
+// rather than through a lossy widening the engine cannot round-trip.
 bool valid_arrival_name(const std::string& arrival_name)
 {
-    return !arrival_name.empty() && arrival_name.size() <= 64 &&
+    return !arrival_name.empty() && arrival_name.size() <= 63 &&
            std::all_of(arrival_name.begin(), arrival_name.end(),
                        [](const unsigned char c) { return c >= 0x20 && c < 0x7F && c != '\\'; });
 }
@@ -40,7 +42,7 @@ std::expected<RunnerPlan, std::string> admit_sample(const std::vector<std::uint8
                                                     ModuleSource& source)
 {
     if (!valid_arrival_name(arrival_name)) {
-        return std::unexpected("sample file name: empty, non-ASCII, or over 64 characters");
+        return std::unexpected("sample file name: empty, non-ASCII, or over 63 characters");
     }
     std::vector<PeImportThunk> imports;
     if (const auto error = parse_imports(sample_bytes.data(), sample_bytes.size(), imports);

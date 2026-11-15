@@ -75,8 +75,14 @@ std::string_view load_error_message(const LoadError error)
         return "loader route accepts PE32+/PE32 images only";
     case LoadError::kBadImageSize:
         return "SizeOfImage missing or beyond the loader cap";
+    case LoadError::kBadHeaders:
+        return "header span (SizeOfHeaders / section table) leaves the image";
     case LoadError::kBadReloc:
         return "relocation block out of range";
+    case LoadError::kBadDelayImport:
+        return "delay import descriptor out of range or VA-addressed";
+    case LoadError::kBadImport:
+        return "import descriptor or thunk malformed";
     }
     return "unknown loader error";
 }
@@ -135,6 +141,10 @@ std::expected<ImageInfo, LoadError> parse_pe(std::span<const std::uint8_t> file)
     // magic (PE32+ 0xF0, PE32 0xE0)
     const auto size_of_optional = read16(file, coff + 16);
     const auto first_section = opt + size_of_optional;
+    // SizeOfHeaders sits at optional+60 for both magics
+    info.size_of_headers = read32(file, opt + 60);
+    info.table_end_rva = static_cast<std::uint32_t>(
+        std::min<std::uint64_t>(first_section + section_count * 40, 0xFFFFFFFFULL));
     for (std::size_t i = 0; i < section_count; ++i) {
         const auto base = first_section + i * 40;
         SectionInfo section;
@@ -154,8 +164,28 @@ std::expected<std::vector<std::uint8_t>, LoadError> build_image(std::span<const 
     if (info.image_size == 0 || info.image_size > kMaxImageSize) {
         return std::unexpected(LoadError::kBadImageSize);
     }
+    // The header block covers the whole header: DOS + PE + optional header +
+    // the FULL section table. A fixed 0x400 copy silently zeroes the trailing
+    // section headers of images whose table extends past 0x400 (real ntdll's
+    // 15-section table runs to 0x450 - the .rsrc/.reloc headers vanished and
+    // the mapped shape diverged from the file). The copy length is the
+    // header span the file declares (or the section-table end as the floor),
+    // clamped to BOTH the source file and the destination image - a header
+    // declaration that leaves either span is the named rejection, never a
+    // truncated or overflowing copy.
+    const auto table_end = static_cast<std::uint64_t>(info.table_end_rva);
+    if (table_end > file.size() || table_end > info.image_size) {
+        return std::unexpected(LoadError::kBadHeaders);
+    }
+    const auto declared_headers = static_cast<std::uint64_t>(info.size_of_headers);
+    if (declared_headers != 0 &&
+        (declared_headers > file.size() || declared_headers > info.image_size)) {
+        return std::unexpected(LoadError::kBadHeaders);
+    }
     std::vector<std::uint8_t> image(static_cast<std::size_t>(info.image_size), 0);
-    const auto header_bytes = std::min<std::uint64_t>(0x400, file.size());
+    const auto header_bytes = std::min<std::uint64_t>(
+        std::max<std::uint64_t>(std::max<std::uint64_t>(declared_headers, table_end), 0x400),
+        std::min<std::uint64_t>(file.size(), info.image_size));
     std::memcpy(image.data(), file.data(), static_cast<std::size_t>(header_bytes));
     for (const auto& section : info.sections) {
         if (section.raw_size == 0 || section.raw_pointer >= file.size()) {

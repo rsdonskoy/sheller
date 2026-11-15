@@ -122,8 +122,9 @@ std::vector<std::uint8_t> make_fixture_dll(const Variant variant)
     put32(dirs + 5 * 8 + 4, 22);
     put32(dirs + 9 * 8, 0x1400); // TLS
     put32(dirs + 9 * 8 + 4, sizeof(sheller::capture::TlsDirectory64));
-    put32(dirs + 13 * 8, kIatRva); // IAT
-    put32(dirs + 13 * 8 + 4, 8);
+    put32(dirs + 12 * 8, kIatRva); // IAT (IMAGE_DIRECTORY_ENTRY_IAT = 12; the
+    put32(dirs + 12 * 8 + 4, 8);   // delay-import slot 13 stays zero for the
+                                   // eager binding's descriptor walk)
 
     const auto sect = base + opt + sizeof(sheller::capture::OptionalHeader64);
     const auto write_section = [&](const unsigned index, const char* const name,

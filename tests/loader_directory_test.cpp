@@ -15,7 +15,9 @@
 #include "boundary_manifest.h"
 #include "boundary_metadata.h"
 #include "craft.h"
+#include "intercept.h"
 #include "loader_route.h"
+#include "run.h"
 
 #include <sheller/peloader.h>
 
@@ -196,20 +198,40 @@ TEST(LoaderDirectory, MissingApisetMapIsNamedRejection)
 
 TEST(LoaderDirectory, SourceTableTiersTheDirectory)
 {
-    // a real-byte module in the directory maps as its own bytes and the
-    // source table distinguishes the tiers (the importing-builder output
-    // carries the reloc table real directory inputs must have)
-    const auto dir = make_directory(
-        "tiers", {{"other.dll", make_importing_source({}, {{"ntdll.dll", {"RtlFoo"}}})}});
+    // the resident set is the dependency closure, not the directory listing:
+    // the real-byte kernel32 the sample's import pulls is resident with its
+    // own bytes (the importing-builder output carries the reloc table real
+    // directory inputs must have), the module kernel32 itself imports joins
+    // through the closure, and a directory DLL nothing imports stays out
+    // entirely - not loaded, not in the source table, not mapped
+    auto linked_kernel32 = make_importing_source(
+        {{"SampleExport", nullptr, sheller_test::kBoundaryTextRva, {0x31, 0xC0, 0xC3}, {}}},
+        {{"linked.dll", {"LinkedExport"}}});
+    const auto linked_dll = make_importing_source(
+        {{"LinkedExport", nullptr, sheller_test::kBoundaryTextRva, {0x31, 0xC0, 0xC3}, {}}},
+        {{"ntdll.dll", {"RtlFoo"}}});
+    const auto unreferenced = make_importing_source({}, {{"ntdll.dll", {"RtlFoo"}}});
+    const auto dir = make_directory("tiers", {{"kernel32.dll", linked_kernel32},
+                                              {"linked.dll", linked_dll},
+                                              {"other.dll", unreferenced}});
     const auto built = sheller::engine::prepare_pe_file(kSamplePath, false, kSynthDir, dir, true);
     ASSERT_TRUE(built.has_value()) << rejection_detail(built);
-    const auto* other_source = find_source(*built, "other.dll");
-    ASSERT_NE(other_source, nullptr);
-    EXPECT_EQ(*other_source, SystemModuleSource::kDirectoryRealBytes);
+    const auto* linked_source = find_source(*built, "linked.dll");
+    ASSERT_NE(linked_source, nullptr);
+    EXPECT_EQ(*linked_source, SystemModuleSource::kDirectoryRealBytes);
+    const auto* kernel32_source = find_source(*built, "kernel32.dll");
+    ASSERT_NE(kernel32_source, nullptr);
+    EXPECT_EQ(*kernel32_source, SystemModuleSource::kDirectoryRealBytes);
+    // the closure never reached other.dll: no source row, no mapping
+    EXPECT_EQ(find_source(*built, "other.dll"), nullptr);
+    EXPECT_FALSE(built->map.module_index_by_name("other.dll").has_value());
     // the derived ntdll's export table answers lookups: the boundary layer
     // is live in this world
     const auto ntdll_base = built->map.module_index_by_name("ntdll.dll");
     ASSERT_TRUE(ntdll_base.has_value());
+    // and the closure-pulled member is actually mapped
+    const auto linked_base = built->map.module_index_by_name("linked.dll");
+    ASSERT_TRUE(linked_base.has_value());
 }
 
 TEST(LoaderDirectory, SyntheticRouteStaysUnmarked)
@@ -223,6 +245,49 @@ TEST(LoaderDirectory, SyntheticRouteStaysUnmarked)
     for (const auto& [name, source] : built->module_sources) {
         EXPECT_EQ(source, SystemModuleSource::kSynthetic) << name;
     }
+}
+
+TEST(LoaderDirectory, ClosureDoesNotRebindAFirstThunkLookupTable)
+{
+    auto kernel32 =
+        make_importing_source({}, {{"linked.dll", {"LinkedExport"}}, {"ntdll.dll", {"RtlFoo"}}});
+    // Both ordinary descriptors use IAT as lookup. The second dependency
+    // resolves immediately; linked.dll needs another discovery round.
+    const std::uint32_t zero = 0;
+    std::memcpy(kernel32.data() + 0x2000, &zero, 4);
+    std::memcpy(kernel32.data() + 0x2014, &zero, 4);
+    const auto linked = make_importing_source({{"LinkedExport", nullptr, 0x1000, {0xC3}, {}}}, {});
+    const auto dir =
+        make_directory("first_thunk", {{"kernel32.dll", kernel32}, {"linked.dll", linked}});
+    const auto built = sheller::engine::prepare_pe_file(kSamplePath, false, kSynthDir, dir, true);
+    ASSERT_TRUE(built.has_value()) << rejection_detail(built);
+    const auto index = built->map.module_index_by_name("linked.dll");
+    ASSERT_TRUE(index.has_value());
+    EXPECT_NE(find_source(*built, "linked.dll"), nullptr);
+}
+
+TEST(LoaderDirectory, PendingDllContributesEveryImportedForwarderToClosure)
+{
+    // A runner imports one representative symbol per dependency. Its direct
+    // representative cannot stand in for another DLL import's forwarder.
+    const auto facade = make_importing_source(
+        {{"Direct", nullptr, 0x1000, {0xC3}, {}}, {"Forwarded", nullptr, 0, {}, "hidden.Target"}},
+        {});
+    const auto hidden = make_importing_source({{"Target", nullptr, 0x1000, {0xC3}, {}}}, {});
+    const auto dir =
+        make_directory("pending_closure", {{"facade.dll", facade}, {"hidden.dll", hidden}});
+    const auto runner = make_importing_source({}, {{"facade.dll", {"Direct"}}});
+    const auto pending = make_importing_source({}, {{"facade.dll", {"Direct", "Forwarded"}}});
+    const auto path = dir / "runner.exe";
+    write_bytes(path, runner);
+    const auto runner_only = sheller::engine::prepare_pe_file(path, false, {}, dir);
+    ASSERT_TRUE(runner_only.has_value()) << rejection_detail(runner_only);
+    EXPECT_EQ(find_source(*runner_only, "hidden.dll"), nullptr);
+    const auto with_pending = sheller::engine::prepare_pe_file(
+        path, false, {}, dir, false, "runner.exe", pending, "payload.dll");
+    ASSERT_TRUE(with_pending.has_value()) << rejection_detail(with_pending);
+    EXPECT_NE(find_source(*with_pending, "hidden.dll"), nullptr);
+    EXPECT_TRUE(with_pending->map.module_index_by_name("hidden.dll").has_value());
 }
 
 // ---- task 3.2: resident real-byte IAT binding ------------------------------
@@ -241,8 +306,8 @@ std::vector<std::uint8_t> make_real_kernel32_source()
 std::uint64_t expected_ntdll_stub_va()
 {
     const auto source = make_boundary_source(boundary_fixture_exports(false));
-    const auto derived =
-        sheller::loader::derive_boundary_image(source, "ntdll.dll", boundary_fixture_rules());
+    const auto derived = sheller::loader::derive_boundary_image(
+        source, "ntdll.dll", boundary_fixture_rules(), 0x7FF800000000ULL);
     EXPECT_TRUE(derived.has_value());
     if (!derived.has_value()) {
         return 0;
@@ -480,6 +545,239 @@ TEST(LoaderDirectory, CompatWhitelistCountsRealBodiesDoNot)
     } else {
         EXPECT_EQ(run.error().stats.syscalls, 0u);
     }
+    std::error_code ec;
+    fs::remove(sample_path, ec);
+}
+
+// ---- trap span dispatch: one hook per trap-owning module -------------------
+
+// Both branches of the span callback in one run: the entry first calls
+// ntdll!NtCreateFile, whose real stub bytes execute inside the trap-owning
+// module and miss the dispatch index (the answered syscall is the proof those
+// instructions ran), then calls ntdll!NtWeird and hits. The hit stops at the
+// same VA with the same named diagnosis the exact-entry form reported.
+TEST(LoaderDirectory, TrapSpanMissesThenHitsInTheSameModule)
+{
+    const auto kernel32_source = make_real_kernel32_source();
+    constexpr std::uint32_t kNtdllBlock = sheller_test::kImportingIatRva + 64;
+    std::vector<std::uint8_t> entry_body;
+    const auto emit_call = [&](const std::uint32_t slot) {
+        auto bytes = call_through(
+            sheller_test::kBoundaryTextRva + static_cast<std::uint32_t>(entry_body.size()), slot);
+        bytes.pop_back(); // the helper's ret: this entry chains two calls
+        entry_body.insert(entry_body.end(), bytes.begin(), bytes.end());
+    };
+    emit_call(kNtdllBlock);     // NtCreateFile: a syscall stub, not a trap
+    emit_call(kNtdllBlock + 8); // NtWeird: the trap
+    entry_body.push_back(0xEB);
+    entry_body.push_back(0xFE);
+    const auto sample =
+        make_importing_source({{"entry", nullptr, sheller_test::kBoundaryTextRva, entry_body, {}}},
+                              {{"kernel32.dll", {"SampleExport"}},
+                               {"ntdll.dll", {"NtCreateFile", "NtWeird", "NtTerminateProcess"}}});
+    const auto sample_path = fs::temp_directory_path() / "sheller_dir_mode_span_miss.exe";
+    write_bytes(sample_path, sample);
+
+    const auto dir = make_directory("spanmiss", {{"kernel32.dll", kernel32_source}});
+    sheller::engine::SyscallRunOptions options;
+    options.system_modules_dir = dir;
+    options.max_instructions = 20000;
+    const auto run = sheller::engine::run_pe_file(sample_path.string(), options);
+    ASSERT_FALSE(run.has_value()) << "the trap must stop the run";
+    EXPECT_EQ(run.error().error, sheller::engine::SyscallRunError::kBoundaryTrap);
+    EXPECT_NE(run.error().detail.find("boundary-trap: ntdll.dll!NtWeird"), std::string::npos)
+        << run.error().detail;
+    // exactly one syscall: the miss branch executed the stub, the hit stopped
+    // the run before anything else ran
+    EXPECT_EQ(run.error().stats.syscalls, 1u);
+    std::error_code ec;
+    fs::remove(sample_path, ec);
+}
+
+// The sample's own code and a trap-free module's real body execute while a
+// trap span is registered on ntdll, and the run stops on its instruction
+// budget - never on a trap verdict. That sample instructions never enter the
+// trap dispatcher is structural (no span is registered over the sample image
+// or a trap-free module: BoundaryDispatch.EverySurvivingTrapVaIsCoveredExactlyOnce);
+// this is the observable consequence. The chain is the proof: kernel32's real
+// body calls its own bound IAT slot, so the counted syscall can only happen if
+// the entry, the trap-free module's bytes and the stub's real bytes inside the
+// span all executed - and that stub is a dispatch miss.
+TEST(LoaderDirectory, SampleAndTrapFreeModuleExecuteUnderATrapSpan)
+{
+    const auto kernel32_source = make_importing_source(
+        {{"SampleExport",
+          nullptr,
+          sheller_test::kBoundaryTextRva,
+          call_through(sheller_test::kBoundaryTextRva, sheller_test::kImportingIatRva),
+          {}}},
+        {{"ntdll.dll", {"NtCreateFile"}}});
+    // the entry calls the trap-free module, then spins on its own code: the
+    // budget stops the run. NtWeird is imported but never called - it is what
+    // puts a trap VA in ntdll, so the span is registered over the module the
+    // chain runs through.
+    std::vector<std::uint8_t> entry_body =
+        call_through(sheller_test::kBoundaryTextRva, sheller_test::kImportingIatRva);
+    entry_body.pop_back(); // the helper's ret: the spin follows the call
+    entry_body.push_back(0xEB);
+    entry_body.push_back(0xFE);
+    const auto sample =
+        make_importing_source({{"entry", nullptr, sheller_test::kBoundaryTextRva, entry_body, {}}},
+                              {{"kernel32.dll", {"SampleExport"}}, {"ntdll.dll", {"NtWeird"}}});
+    const auto sample_path = fs::temp_directory_path() / "sheller_dir_mode_span_free.exe";
+    write_bytes(sample_path, sample);
+
+    const auto dir = make_directory("spanfree", {{"kernel32.dll", kernel32_source}});
+    sheller::engine::SyscallRunOptions options;
+    options.system_modules_dir = dir;
+    options.max_instructions = 20000;
+    const auto run = sheller::engine::run_pe_file(sample_path.string(), options);
+    ASSERT_FALSE(run.has_value()) << "the budget must stop the run";
+    EXPECT_EQ(run.error().error, sheller::engine::SyscallRunError::kBudgetExhausted)
+        << run.error().detail;
+    EXPECT_EQ(run.error().stats.syscalls, 1u);
+    EXPECT_GE(run.error().stats.blocks, 3u); // sample entry, kernel32 body, ntdll stub
+    std::error_code ec;
+    fs::remove(sample_path, ec);
+}
+
+// Two trap rows on one VA are legal alias input, not a construction error:
+// the dispatch index deduplicates them, the run stops once, and the diagnosis
+// keeps the first row's name. The baseline is the same guest without the extra
+// row - kind, detail and stats must be identical.
+TEST(LoaderDirectory, TrapAliasRowsStopOnceWithTheFirstName)
+{
+    const auto kernel32_source = make_real_kernel32_source();
+    std::vector<std::uint8_t> entry_body =
+        call_through(sheller_test::kBoundaryTextRva, sheller_test::kImportingIatRva + 64);
+    entry_body.push_back(0xEB);
+    entry_body.push_back(0xFE);
+    const auto sample =
+        make_importing_source({{"entry", nullptr, sheller_test::kBoundaryTextRva, entry_body, {}}},
+                              {{"kernel32.dll", {"SampleExport"}}, {"ntdll.dll", {"NtWeird"}}});
+    const auto sample_path = fs::temp_directory_path() / "sheller_dir_mode_span_alias.exe";
+    write_bytes(sample_path, sample);
+    const auto dir = make_directory("spanalias", {{"kernel32.dll", kernel32_source}});
+
+    sheller::engine::SyscallRunOptions options;
+    options.system_modules_dir = dir;
+    options.max_instructions = 20000;
+    auto baseline = sheller::engine::prepare_pe_file(sample_path.string(), false, {}, dir, false);
+    ASSERT_TRUE(baseline.has_value()) << rejection_detail(baseline);
+    auto aliased = sheller::engine::prepare_pe_file(sample_path.string(), false, {}, dir, false);
+    ASSERT_TRUE(aliased.has_value()) << rejection_detail(aliased);
+    ASSERT_EQ(aliased->boundary_trap_vas.size(), 1u);
+    const auto trap_va = aliased->boundary_trap_vas[0];
+    aliased->boundary_trap_vas.push_back(trap_va);
+    const auto inserted = aliased->boundary_trap_names.emplace(
+        trap_va, std::make_tuple(std::string("ntdll.dll"), std::string("NtWeirdAlias"), 3u));
+    EXPECT_FALSE(inserted.second) << "the alias row must not overwrite the first name";
+    ASSERT_EQ(aliased->boundary_trap_vas.size(), 2u);
+
+    const auto direct = sheller::engine::run_syscalls(*baseline, options, {});
+    const auto with_alias = sheller::engine::run_syscalls(*aliased, options, {});
+    ASSERT_FALSE(direct.has_value());
+    ASSERT_FALSE(with_alias.has_value());
+    EXPECT_EQ(direct.error().error, sheller::engine::SyscallRunError::kBoundaryTrap);
+    EXPECT_EQ(with_alias.error().error, sheller::engine::SyscallRunError::kBoundaryTrap);
+    EXPECT_EQ(with_alias.error().detail, direct.error().detail);
+    EXPECT_EQ(with_alias.error().stats.syscalls, direct.error().stats.syscalls);
+    EXPECT_EQ(with_alias.error().stats.blocks, direct.error().stats.blocks);
+    EXPECT_NE(direct.error().detail.find("boundary-trap: ntdll.dll!NtWeird"), std::string::npos)
+        << direct.error().detail;
+    EXPECT_EQ(with_alias.error().detail.find("NtWeirdAlias"), std::string::npos)
+        << with_alias.error().detail;
+    std::error_code ec;
+    fs::remove(sample_path, ec);
+}
+
+// An intercept on the trap VA still wins over the trap: the plan drops that
+// VA from the trap list, the intercept dispatches through the intercept side
+// (its own module span under the span form), and the engine answers the call
+// instead of the trap stopping the run.
+TEST(LoaderDirectory, InterceptOnATrapVaRegistersNoSpan)
+{
+    const auto kernel32_source = make_real_kernel32_source();
+    std::vector<std::uint8_t> entry_body =
+        call_through(sheller_test::kBoundaryTextRva, sheller_test::kImportingIatRva + 64);
+    entry_body.push_back(0xEB);
+    entry_body.push_back(0xFE);
+    const auto sample =
+        make_importing_source({{"entry", nullptr, sheller_test::kBoundaryTextRva, entry_body, {}}},
+                              {{"kernel32.dll", {"SampleExport"}}, {"ntdll.dll", {"NtWeird"}}});
+    const auto sample_path = fs::temp_directory_path() / "sheller_dir_mode_span_intercept.exe";
+    write_bytes(sample_path, sample);
+    const auto dir = make_directory("spanintercept", {{"kernel32.dll", kernel32_source}});
+
+    auto guest = sheller::engine::prepare_pe_file(sample_path.string(), false, {}, dir, false);
+    ASSERT_TRUE(guest.has_value()) << rejection_detail(guest);
+    ASSERT_EQ(guest->boundary_trap_vas.size(), 1u);
+    guest->intercepts.emplace_back(
+        guest->boundary_trap_vas[0],
+        static_cast<std::uint32_t>(sheller::engine::InterceptId::kExitProcess));
+
+    sheller::engine::SyscallRunOptions options;
+    options.system_modules_dir = dir;
+    options.max_instructions = 20000;
+    const auto run = sheller::engine::run_syscalls(*guest, options, {});
+    ASSERT_TRUE(run.has_value()) << run.error().detail;
+    EXPECT_TRUE(run->terminated);
+    EXPECT_EQ(run->syscalls, 0u); // the intercept answered, no syscall ran
+    std::error_code ec;
+    fs::remove(sample_path, ec);
+}
+
+// The intercept span form, the mirror of TrapSpanMissesThenHits: an intercept
+// owns ntdll (a declared intercept on the NtTerminateProcess export), so a
+// span is registered over the module and the sample's path first runs a
+// non-entry instruction inside it - ntdll!NtCreateFile, whose real stub bytes
+// execute inside the span and miss the dispatch index (the answered syscall
+// is the proof those instructions ran, with nothing else disturbed) - then
+// hits the intercepted entry and terminates through the engine answer.
+TEST(LoaderDirectory, InterceptSpanMissesThenHitsInTheSameModule)
+{
+    const auto kernel32_source = make_real_kernel32_source();
+    constexpr std::uint32_t kNtdllCreateFileSlot = sheller_test::kImportingIatRva + 64;
+    constexpr std::uint32_t kNtdllHitSlot = sheller_test::kImportingIatRva + 72;
+    std::vector<std::uint8_t> entry_body;
+    const auto emit_call = [&](const std::uint32_t slot) {
+        auto bytes = call_through(
+            sheller_test::kBoundaryTextRva + static_cast<std::uint32_t>(entry_body.size()), slot);
+        bytes.pop_back(); // the helper's ret: this entry chains two calls
+        entry_body.insert(entry_body.end(), bytes.begin(), bytes.end());
+    };
+    emit_call(kNtdllCreateFileSlot); // a real stub: executes inside the span, a miss
+    emit_call(kNtdllHitSlot);        // the intercepted entry: the hit
+    entry_body.push_back(0xEB);
+    entry_body.push_back(0xFE); // unreachable unless the intercept failed to fire
+    const auto sample = make_importing_source(
+        {{"entry", nullptr, sheller_test::kBoundaryTextRva, entry_body, {}}},
+        {{"kernel32.dll", {"SampleExport"}}, {"ntdll.dll", {"NtCreateFile", "NtWeird"}}});
+    const auto sample_path = fs::temp_directory_path() / "sheller_dir_mode_ispan_miss.exe";
+    write_bytes(sample_path, sample);
+
+    const auto dir = make_directory("ispanmiss", {{"kernel32.dll", kernel32_source}});
+    auto guest = sheller::engine::prepare_pe_file(sample_path.string(), false, {}, dir, false);
+    ASSERT_TRUE(guest.has_value()) << rejection_detail(guest);
+    // The declared intercept: ntdll owns it, so the run registers one span
+    // over the module instead of a per-entry hook. NtWeird is the trap export;
+    // the intercept supersedes the trap (the trap VA drops from the trap
+    // list) and the span dispatch answers the call instead.
+    const auto weird = std::find_if(guest->loader_exports.begin(), guest->loader_exports.end(),
+                                    [](const auto& entry) { return entry.name == "NtWeird"; });
+    ASSERT_NE(weird, guest->loader_exports.end());
+    guest->intercepts.emplace_back(
+        weird->function_va, static_cast<std::uint32_t>(sheller::engine::InterceptId::kExitProcess));
+
+    sheller::engine::SyscallRunOptions options;
+    options.system_modules_dir = dir;
+    options.max_instructions = 20000;
+    const auto run = sheller::engine::run_syscalls(*guest, options, {});
+    ASSERT_TRUE(run.has_value()) << run.error().detail;
+    EXPECT_TRUE(run->terminated);
+    // exactly one syscall: the miss branch executed the stub inside the span,
+    // the hit answered the call and stopped the run before anything else
+    EXPECT_EQ(run->syscalls, 1u);
     std::error_code ec;
     fs::remove(sample_path, ec);
 }
@@ -857,11 +1155,21 @@ TEST(LoaderDirectory, ReplayRestoresTheRunTables)
     EXPECT_TRUE(replay->loader_route);
     EXPECT_TRUE(replay->directory_mode);
 
-    // modules: the resident set matches the construction (base, size, name)
+    // modules: the resident set matches the construction (base, size, name).
+    // The lists align member for member in InLoadOrder chain order. The
+    // entry image is the one name exception: the replay reads the
+    // guest-visible Ldr arrival name from the photographed world, while the
+    // construction's list keeps the host attribution placeholder
+    // (`loader_image`) - the synthetic name never enters a Ldr table entry.
     ASSERT_EQ(replay->loader_modules.size(), construction->loader_modules.size());
     for (std::size_t i = 0; i < replay->loader_modules.size(); ++i) {
         EXPECT_EQ(replay->loader_modules[i].base, construction->loader_modules[i].base);
         EXPECT_EQ(replay->loader_modules[i].size, construction->loader_modules[i].size);
+        if (replay->loader_modules[i].base == replay->metadata.image_base) {
+            EXPECT_NE(std::string(replay->loader_modules[i].name.data()), "loader_image")
+                << "the synthetic attribution placeholder reached the guest-visible name";
+            continue;
+        }
         EXPECT_EQ(std::string(replay->loader_modules[i].name.data()),
                   std::string(construction->loader_modules[i].name.data()));
     }
@@ -961,7 +1269,7 @@ TEST(LoaderDirectory, DllAdmissionResolvesThroughDirectoryRealExports)
     snapshot::Reader reader{in};
     const auto header = reader.read_header();
     ASSERT_TRUE(header.has_value());
-    EXPECT_EQ(header->version, snapshot::kVersionV2); // DLL input: pending block present
+    EXPECT_EQ(header->version, snapshot::kVersionV3); // DLL input: pending + clock blocks
 }
 
 #ifdef _WIN32
@@ -1240,14 +1548,20 @@ TEST(LoaderDirectory, StrictFacadeAndUnpackNeedNoSyntheticDirectory)
 
 TEST(LoaderDirectory, ForwardedDynamicLookupKeepsOwnerAndDirectoryMap)
 {
+    // owner.dll's Alias is a forwarder into the map-hosted contract; the
+    // sample statically imports owner.dll so the closure pulls it in (the
+    // closure, not the directory listing, decides residency), and the
+    // forwarded dynamic lookup keeps its owner attribution through the
+    // directory map
     const auto owner = make_importing_source(
         {{"Alias", nullptr, 0, {}, "api-ms-win-core-fixture-l1-1-0.Final"}}, {});
     const auto target = make_importing_source({{"Final", nullptr, 0x1000, {0xC3}, {}}}, {});
     const auto dir =
         make_directory("review_forward", {{"owner.dll", owner}, {"fakentdll.dll", target}});
-    const auto sample = write_review_sample(
-        "sheller_review_forward.exe",
-        make_importing_source({{"entry", nullptr, 0x1000, {0xEB, 0xFE}, {}}}, {}));
+    const auto sample =
+        write_review_sample("sheller_review_forward.exe",
+                            make_importing_source({{"entry", nullptr, 0x1000, {0xEB, 0xFE}, {}}},
+                                                  {{"owner.dll", {"Alias"}}}));
     auto direct = sheller::engine::prepare_pe_file(sample, false, {}, dir, false);
     ASSERT_TRUE(direct.has_value()) << direct.error().detail;
     const auto container = sheller::engine::craft_container_from_guest(*direct);
@@ -1322,16 +1636,21 @@ TEST(LoaderDirectory, ForwarderClosureAddsMissingFallbackEndpoint)
 
 TEST(LoaderDirectory, ImporterSpecificMissingHostUsesTheImporter)
 {
-    const auto dependent = make_importing_source({{"entry", nullptr, 0x1000, {0xC3}, {}}},
-                                                 {{"api-ms-win-core-console-l1-1-0", {"malloc"}}});
+    // the sample statically imports fakeuser32 (closure membership), whose
+    // importer-conditional map entry names other.dll as the host - the
+    // missing host is reported against the importer's own name
+    const auto dependent = make_importing_source(
+        {{"FakeEntry", nullptr, 0x1000, {0xC3}, {}}, {"entry", nullptr, 0x1000, {0xC3}, {}}},
+        {{"api-ms-win-core-console-l1-1-0", {"malloc"}}});
     const auto dir = make_directory("review_importer", {{"fakeuser32.dll", dependent}});
-    const auto sample = write_review_sample(
-        "sheller_review_importer.exe",
-        make_importing_source({{"entry", nullptr, 0x1000, {0xEB, 0xFE}, {}}}, {}));
+    const auto sample =
+        write_review_sample("sheller_review_importer.exe",
+                            make_importing_source({{"entry", nullptr, 0x1000, {0xEB, 0xFE}, {}}},
+                                                  {{"fakeuser32.dll", {"FakeEntry"}}}));
     const auto built = sheller::engine::prepare_pe_file(sample, false, {}, dir, false);
     ASSERT_FALSE(built.has_value());
     EXPECT_NE(built.error().detail.find("other.dll"), std::string::npos);
-    EXPECT_EQ(built.error().detail.find("fakentdll.dll"), std::string::npos);
+    EXPECT_NE(built.error().detail.find("fakeuser32.dll"), std::string::npos);
 }
 
 TEST(LoaderDirectory, DllAdmissionResolvesApiSetsAndOrdinalForwarders)

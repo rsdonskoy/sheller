@@ -1,6 +1,9 @@
 // Loader core unit tests: parse, layout, relocations and TLS
 // extraction are pure byte functions - all driven here without unicorn.
+// The KUSER environment fields join here: the fixed infrastructure page
+// (NtSystemRoot included) and its double-construction identity.
 
+#include "env.h"
 #include "loader.h"
 
 #include <gtest/gtest.h>
@@ -8,11 +11,192 @@
 #include <algorithm>
 #include <cstdio>
 #include <cstring>
+#include <string>
 #include <vector>
 
 namespace {
 
 using namespace sheller::loader;
+
+std::uint16_t peek16(const std::vector<std::uint8_t>& bytes, std::size_t offset)
+{
+    std::uint16_t value = 0;
+    std::memcpy(&value, bytes.data() + offset, sizeof value);
+    return value;
+}
+
+TEST(LoaderEnv, KuserSystemRootShapeAndDoubleBuildIdentity)
+{
+    std::vector<std::uint8_t> first(0x1000, std::uint8_t{0});
+    std::vector<std::uint8_t> second(0x1000, std::uint8_t{0});
+    fill_kuser_shared_data(first);
+    fill_kuser_shared_data(second);
+    // double construction: byte-identical
+    ASSERT_EQ(first.size(), second.size());
+    EXPECT_EQ(0, std::memcmp(first.data(), second.data(), first.size()));
+
+    // the NtSystemRoot field: UTF-16 `c:\windows` at 0x30 (the capture
+    // spelling, lowercase, NUL-terminated) - a shell's PEB walk reads it
+    static const std::uint8_t kExpected[] = {
+        'c',  0x00, ':',  0x00, '\\', 0x00, 'w',  0x00, 'i',  0x00, 'n',
+        0x00, 'd',  0x00, 'o',  0x00, 'w',  0x00, 's',  0x00, 0x00, 0x00}; // "c:\windows" + NUL
+    EXPECT_EQ(0, std::memcmp(first.data() + 0x30, kExpected, sizeof kExpected));
+    // nothing spills past the field
+    for (std::size_t i = 0x30 + sizeof kExpected; i < 0x40; ++i) {
+        ASSERT_EQ(first[i], 0) << "byte 0x" << std::hex << i;
+    }
+    // the time-varying pair keeps its existing fixed values
+    EXPECT_EQ(first[0x14 + 7], 0x01); // the fixed file time's high byte
+    EXPECT_EQ(first[0x320], 0x00);    // the fixed tick's low byte
+}
+
+TEST(LoaderEnv, KuserShortPageIsLeftAlone)
+{
+    std::vector<std::uint8_t> tiny(0x100, std::uint8_t{0xAB});
+    fill_kuser_shared_data(tiny);
+    for (const auto b : tiny) {
+        ASSERT_EQ(b, 0xAB); // below the field floor: untouched
+    }
+}
+
+TEST(LoaderEnv, ChainOrdersThreadEachChainByItsOwnRecord)
+{
+    // the capture corpus's three-chain record: load/memory lead with the
+    // main image; init excludes it and runs ntdll, kernelbase, kernel32 -
+    // one chain's order never extrapolates onto another
+    const std::uint64_t env_base = 0x02000000;
+    // module order: entry last (the images order), the record's members
+    const std::vector<EnvModule> modules{{0x7FF800000000ULL, 0x268000, "ntdll.dll"},
+                                         {0x7FF900000000ULL, 0xCB000, "kernel32.dll"},
+                                         {0x7FFA00000000ULL, 0x401000, "kernelbase.dll"},
+                                         {0x400000, 0x2000, "sheller_run.exe"}};
+    const std::size_t entry = 3;
+    ChainOrders orders;
+    orders.load = {entry, 0, 1, 2};
+    orders.memory = {entry, 0, 1, 2};
+    orders.init = {0, 2, 1}; // the record: no main image, kernelbase before kernel32
+    const auto build =
+        build_environment(env_base, 0x400000, 0x300000, 0x200000, 0x4000000, modules, orders)
+            .value();
+    ASSERT_EQ(build.env.size(), static_cast<std::size_t>(kEnvBlockSize));
+
+    const std::size_t node_base = static_cast<std::size_t>(kEnvLdrOffset) + 0x58;
+    const auto peek64 = [&](std::size_t offset) {
+        std::uint64_t value = 0;
+        std::memcpy(&value, build.env.data() + offset, sizeof value);
+        return value;
+    };
+    // walk each chain by Flink from its head; the sequence of node slots
+    // maps back to member indices, checked against the order
+    const auto walk = [&](std::size_t chain) {
+        const std::size_t head = static_cast<std::size_t>(kEnvLdrOffset) + 0x10 + chain * 0x10;
+        std::vector<std::size_t> sequence;
+        std::uint64_t link = peek64(head);
+        bool closed = false;
+        for (std::size_t step = 0; step <= modules.size(); ++step) {
+            const std::size_t at = static_cast<std::size_t>(link - env_base);
+            if (at == head) {
+                closed = true; // back at the head: closed
+                break;
+            }
+            const std::size_t slot = at - node_base;
+            const std::size_t index =
+                (slot - chain * 0x10) / static_cast<std::size_t>(kLdrEntryStride);
+            sequence.push_back(index);
+            link = peek64(at);
+        }
+        EXPECT_TRUE(closed) << "chain " << chain << " does not close at its head";
+        return sequence;
+    };
+    EXPECT_EQ(walk(0), (std::vector<std::size_t>{entry, 0, 1, 2})); // load
+    EXPECT_EQ(walk(1), (std::vector<std::size_t>{entry, 0, 1, 2})); // memory
+    EXPECT_EQ(walk(2), (std::vector<std::size_t>{0, 2, 1}));        // init: no main image
+}
+
+TEST(LoaderEnv, DefaultOrdersKeepArgumentSequenceEverywhere)
+{
+    // no orders: the pre-record shape - every chain in argument order
+    const std::uint64_t env_base = 0x02000000;
+    const std::vector<EnvModule> modules{{0x7FF800000000ULL, 0x268000, "ntdll.dll"},
+                                         {0x400000, 0x2000, "sample.exe"}};
+    const auto build =
+        build_environment(env_base, 0x400000, 0x300000, 0x200000, 0x4000000, modules).value();
+    const std::size_t node_base = static_cast<std::size_t>(kEnvLdrOffset) + 0x58;
+    const auto peek64 = [&](std::size_t offset) {
+        std::uint64_t value = 0;
+        std::memcpy(&value, build.env.data() + offset, sizeof value);
+        return value;
+    };
+    for (std::size_t chain = 0; chain < 3; ++chain) {
+        const std::size_t head = static_cast<std::size_t>(kEnvLdrOffset) + 0x10 + chain * 0x10;
+        EXPECT_EQ(peek64(head), env_base + node_base + chain * 0x10) << "chain " << chain;
+    }
+}
+
+TEST(LoaderEnv, LdrEntryNamesAreUtf16WithByteLengths)
+{
+    // the static entries carry the same name conventions as the runtime
+    // insertions and real captures: one UTF-16LE buffer + u16 NUL, UNICODE_STRING
+    // Length counting bytes - a wchar-wise name walk (every read 2 bytes) compares
+    // equal, and a wide read of the buffer yields the folded name
+    const std::uint64_t env_base = 0x02000000;
+    const std::vector<EnvModule> modules{{0x400000, 0x2000, "sample.exe"},
+                                         {0x7FF800000000ULL, 0x268000, "ntdll.dll"}};
+    const auto build =
+        build_environment(env_base, 0x400000, 0x300000, 0x200000, 0x4000000, modules).value();
+    const std::size_t node_base = static_cast<std::size_t>(kEnvLdrOffset) + 0x58;
+    for (std::size_t i = 0; i < modules.size(); ++i) {
+        const auto block = node_base + i * static_cast<std::size_t>(kLdrEntryStride);
+        const auto length = static_cast<std::uint16_t>(2 * modules[i].name.size());
+        // both UNICODE_STRINGs: Length bytes, MaximumLength adds the terminator
+        EXPECT_EQ(peek16(build.env, block + 0x48), length) << "module " << i;
+        EXPECT_EQ(peek16(build.env, block + 0x4A), length + 2) << "module " << i;
+        EXPECT_EQ(peek16(build.env, block + 0x58), length) << "module " << i;
+        EXPECT_EQ(peek16(build.env, block + 0x5A), length + 2) << "module " << i;
+        // the buffer: UTF-16LE text, u16 NUL, nothing spills past the pair
+        const auto buffer_at = block + 0x80;
+        for (std::size_t c = 0; c < modules[i].name.size(); ++c) {
+            EXPECT_EQ(build.env[buffer_at + 2 * c], static_cast<std::uint8_t>(modules[i].name[c]))
+                << "module " << i << " char " << c;
+            EXPECT_EQ(build.env[buffer_at + 2 * c + 1], 0) << "module " << i << " char " << c;
+        }
+        EXPECT_EQ(build.env[buffer_at + length], 0) << "module " << i;
+        EXPECT_EQ(build.env[buffer_at + length + 1], 0) << "module " << i;
+    }
+}
+
+TEST(LoaderEnv, OverlongEntryNameIsANamedRefusal)
+{
+    // exactly 64 characters need 130 bytes and the +0x80 buffer holds 0x80:
+    // the build refuses by name instead of truncating (a truncated name
+    // would be a second, quieter walk-breaking name)
+    const std::uint64_t env_base = 0x02000000;
+    const std::vector<EnvModule> modules{{0x400000, 0x2000, std::string(60, 'a') + ".dll"}};
+    const auto refused =
+        build_environment(env_base, 0x400000, 0x300000, 0x200000, 0x4000000, modules);
+    ASSERT_FALSE(refused.has_value());
+    EXPECT_EQ(refused.error().name, modules[0].name);
+}
+
+TEST(LoaderEnv, ExactlyFullEntryNameStillBuilds)
+{
+    // 63 characters need 2*63+2 = 0x80 bytes: exactly the +0x80 buffer, so
+    // the refusal guard stays exclusive - one more char (the 64-char refusal
+    // above) is what flips it
+    const std::uint64_t env_base = 0x02000000;
+    const std::vector<EnvModule> modules{{0x400000, 0x2000, std::string(63, 'a')}};
+    const auto build =
+        build_environment(env_base, 0x400000, 0x300000, 0x200000, 0x4000000, modules).value();
+    const auto block = static_cast<std::size_t>(kEnvLdrOffset) + 0x58;
+    EXPECT_EQ(peek16(build.env, block + 0x48), 126); // FullDllName.Length
+    EXPECT_EQ(peek16(build.env, block + 0x4A), 128); // MaximumLength fills the buffer
+    EXPECT_EQ(peek16(build.env, block + 0x58), 126); // BaseDllName.Length
+    EXPECT_EQ(peek16(build.env, block + 0x5A), 128);
+    // the shared buffer is exactly full: the u16 NUL lands on its last two bytes
+    const auto buffer_at = block + 0x80;
+    EXPECT_EQ(build.env[buffer_at + 0xFE], 0);
+    EXPECT_EQ(build.env[buffer_at + 0xFF], 0);
+}
 
 // Minimal x64 PE32+ file: headers at 0x0, one section at raw 0x200 mapped at
 // RVA 0x1000, a relocation block and a TLS directory inside the section.
@@ -267,6 +451,40 @@ TEST(LoaderReloc32, HighLowMovesWithSmallDelta)
     const std::uint64_t delta = 0x10000;
     ASSERT_TRUE(apply_relocations(*image, *info, delta).has_value());
     EXPECT_EQ(load32_at(*image, 0x1010), 0x00400000U + static_cast<std::uint32_t>(delta));
+}
+
+TEST(LoaderEnv, HeaderSpanDeclarationsLeavingTheImageAreNamedRejections)
+{
+    // the section table (and SizeOfHeaders) must stay inside BOTH the source
+    // file and the destination image: a header span that leaves either is
+    // the named rejection, never a truncated copy or an out-of-range write
+    // (96 sections at TinyPe's layout put the table end at 0x1048 - an image
+    // that ends at 0x1000 cannot hold it, and build_image refuses by name)
+    TinyPe t = make_tiny_pe();
+    t.put16(0x46, 96);
+    t.image_size = 0x1000;
+    t.put32(0x90, static_cast<std::uint32_t>(t.image_size));
+    const std::size_t table_end = 0x148 + 96 * 40; // 0x1048
+    t.bytes.resize(table_end + 0x40, 0);           // the file itself carries the table
+    auto info = parse_pe(t.bytes);
+    ASSERT_TRUE(info.has_value());
+    EXPECT_EQ(info->sections.size(), 96u);
+    EXPECT_GT(info->table_end_rva, t.image_size);
+    const auto built = build_image(t.bytes, *info);
+    ASSERT_FALSE(built.has_value());
+    EXPECT_EQ(built.error(), LoadError::kBadHeaders);
+}
+
+TEST(LoaderEnv, DeclaredSizeOfHeadersLeavingTheImageIsNamedRejection)
+{
+    // SizeOfHeaders past the image (or past the file) is the same rejection
+    TinyPe t = make_tiny_pe();
+    t.put32(0x94, 0x8000); // SizeOfHeaders > SizeOfImage 0x2000
+    auto info = parse_pe(t.bytes);
+    ASSERT_TRUE(info.has_value());
+    const auto built = build_image(t.bytes, *info);
+    ASSERT_FALSE(built.has_value());
+    EXPECT_EQ(built.error(), LoadError::kBadHeaders);
 }
 
 } // namespace

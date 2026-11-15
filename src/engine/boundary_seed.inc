@@ -47,7 +47,7 @@ struct SeedModule {
 
 // ntdll.dll (x64)
 inline constexpr SeedImage kNtdllX64Images[] = {
-    {0x6c806f42b18c5f46ULL, "tests/boundary_fixture.h make_boundary_source(boundary_fixture_exports(false)) - the self-made mechanism-corpus image the CI directory-mode tests map; re-pin when the fixture changes"},
+    {0x594c03e7cec6369aULL, "tests/boundary_fixture.h make_boundary_source(boundary_fixture_exports(false)) - the self-made mechanism-corpus image the CI directory-mode tests map; re-pin when the fixture changes"},
 };
 inline constexpr SeedExport kNtdllX64Exports[] = {
     {"NtCreateFile", 0, 0, 0x0000000000000000ULL, "", 0, 0, ""},
@@ -62,7 +62,7 @@ inline constexpr SeedExport kNtdllX64Exports[] = {
 
 // ntdll.dll (x64)
 inline constexpr SeedImage kNtdllX64RealImages[] = {
-    {0xde055585ba0729d4ULL, "real Windows build from C:\\Windows\\System32\\ntdll.dll"},
+    {0x10d75b5a36dbefafULL, "real Windows build from C:\\Windows\\System32\\ntdll.dll (2026-11-11 patch level; the pre-patch image this entry previously pinned no longer exists on the host)"},
 };
 inline constexpr SeedExport kNtdllX64RealExports[] = {
     {"", 8, 2, 0x0000000000000000ULL, "", 0, 0, ""},

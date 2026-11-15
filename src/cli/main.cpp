@@ -3,10 +3,11 @@
 // A bare invocation prints the same banner as --version. The run/unpack
 // subcommands are thin shells over the analysis facade (analyze /
 // unpack_sample): run states its route - with --from-snapshot the positional
-// is a v1 snapshot replayed, without it the positional is an x64 PE sample
+// is a snapshot container (v1/v2/v3) replayed, without it the positional is
+// an x64 PE sample
 // run as a pass-through on the host platform - and unpack is the one-shot
 // pipeline on every host. capture re-photographs a suspended sample process
-// into a v1 snapshot file (Windows hosts only).
+// into a snapshot container - v3, with the clock block (Windows hosts only).
 
 #include <CLI/CLI.hpp>
 
@@ -694,7 +695,7 @@ int main(int argc, char* argv[])
     std::string output_path;
     auto disable_aslr = false;
     auto* capture_command = app.add_subcommand(
-        "capture", "re-photograph a suspended sample process into a v1 snapshot file");
+        "capture", "re-photograph a suspended sample process into a snapshot container (v3)");
     capture_command->add_option("sample", sample_path, "path to the x64 PE sample")->required();
     capture_command->add_option("-o,--output", output_path, "path of the snapshot file to write")
         ->required();
@@ -718,14 +719,15 @@ int main(int argc, char* argv[])
     std::vector<std::string> reject_specs;
     int run_exit_code = 0;
     auto* run_command = app.add_subcommand("run", "run a sample until termination or budget end "
-                                                  "(--from-snapshot replays a v1 snapshot)");
+                                                  "(--from-snapshot replays a snapshot container)");
     run_command
         ->add_option("sample", run_input,
-                     "path to an x64 PE sample (a v1 snapshot path with --from-snapshot)")
+                     "path to an x64 PE sample (a snapshot container path with --from-snapshot)")
         ->required();
     auto run_from_snapshot = false;
     run_command->add_flag("--from-snapshot", run_from_snapshot,
-                          "replay the positional path as a v1 snapshot; without it the path runs "
+                          "replay the positional path as a snapshot container (v1/v2/v3); without "
+                          "it the path runs "
                           "as a sample pass-through on the host platform");
     std::string run_dump_dir;
     run_command->add_option("--dump", run_dump_dir,

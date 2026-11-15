@@ -11,8 +11,10 @@
 #include "../loader/imports.h"
 #include "../syscalls/syscall_policy.h"
 #include "behavior_fact.h"
+#include "boundary_dispatch.h"
 #include "boundary_metadata.h"
 #include "exception_layout.h"
+#include "intercept_span_dispatch.h"
 #include "mem_region_map.h"
 #include "native_gate.h"
 #include "seh_dispatcher.h"
@@ -27,7 +29,12 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <cstdlib>
+#include <cstring>
 #include <filesystem>
+#ifdef _WIN32
+#include <malloc.h>
+#endif
 #include <functional>
 #include <map>
 #include <optional>
@@ -51,6 +58,37 @@ inline constexpr std::uint64_t kMapAlignment = 0x1000;
 // HIGHLOW relocations never wrap a 32-bit delta.
 inline constexpr std::uint64_t kLoaderNullBytes = 0x10000;
 inline constexpr std::uint64_t kLoaderKUser = 0x7FFE0000;
+inline constexpr std::size_t kPageBytes = 0x1000;
+// The KUSER_SHARED_DATA page's host backing: worlds that carry the page map
+// it through uc_mem_map_ptr over an engine-owned aligned buffer, so the
+// clock publishes plain host stores. The alternative - uc_mem_write from
+// inside the block hook - invalidates translation state per call (measured
+// in the tens of microseconds here) and taxed tight guest loops ~20x; a
+// host store into mapped RAM is free and the guest's loads read through the
+// same bytes. Null when the world carries no KUSER page: publishes skip.
+struct AlignedPageDeleter {
+    void operator()(std::uint8_t* p) const noexcept
+    {
+#ifdef _WIN32
+        _aligned_free(p);
+#else
+        std::free(p);
+#endif
+    }
+};
+using KuserHostPage = std::unique_ptr<std::uint8_t, AlignedPageDeleter>;
+inline KuserHostPage allocate_kuser_page()
+{
+#ifdef _WIN32
+    auto* const raw = _aligned_malloc(kPageBytes, 0x1000);
+#else
+    auto* const raw = std::aligned_alloc(0x1000, kPageBytes);
+#endif
+    if (raw != nullptr) {
+        std::memset(raw, 0, kPageBytes);
+    }
+    return KuserHostPage(static_cast<std::uint8_t*>(raw));
+}
 // Synthetic-module loader route remap target: a sample whose preferred base
 // exceeds 4GB (UPX-stub citizens bake base-relative pointers, and consuming
 // one through a 32-bit slot drops the high dword - rip=0x95480 for
@@ -200,6 +238,9 @@ struct LoadedSnapshot {
     // Present exactly when the container is v2 (DLL-input route); a v2
     // container without a complete pending block fails to load.
     std::optional<snapshot::PendingModule> pending{};
+    // Present exactly when the container is v3: the pinned clock policy the
+    // run stage answers from. v1/v2 containers replay on the engine default.
+    std::optional<snapshot::ClockPolicy> clock_policy{};
     // The bilateral directory-mode inspection's verdict:
     // nullopt when both sides are absent (the legacy route), the decoded
     // record when the container carries the mode.
@@ -294,6 +335,15 @@ struct PreparedGuest {
     // container. Empty for every EXE/shellcode input - the synthetic load
     // never arms.
     std::optional<snapshot::PendingModule> pending{};
+    // The v3 container's clock-policy block: present exactly when the
+    // container carries one; the run stage answers from the engine default
+    // otherwise. PreparedGuest routes built in memory (loader route, tests)
+    // leave it empty - defaults apply.
+    std::optional<snapshot::ClockPolicy> clock_policy{};
+    // The host-backed KUSER page when the world maps one (owned; the buffer
+    // must outlive the unicorn instance that maps it - it does, since the
+    // unicorn handle is a member here and unicorn unmaps at uc_close).
+    KuserHostPage kuser_host_page{};
     // Full module bytes for the resident-world tables (attach_resident_world
     // fills these alongside loader_exports): the pending module's IAT
     // resolution follows export forwarders, which needs the export
@@ -446,6 +496,17 @@ struct SyscallRunState {
     std::vector<std::string> intercept_names;
     std::vector<std::uint16_t> intercept_modules;
     std::int32_t pending_intercept{-1};
+    // The intercept dispatch index and its registration lists, built once at
+    // apply time from the plan's columns (the same spelling the trap side
+    // builds from plan.boundary_trap_vas): the sorted VA table the span and
+    // solo callbacks binary-search, one span per intercept-owning module, and
+    // the rows that keep an individual hook - sentinel rows, plus any
+    // non-sentinel row the selected spans fail to cover exactly once, so a
+    // silently dropped intercept is structurally unreachable. The identity
+    // columns above stay exactly as constructed, indexed by original row.
+    std::vector<InterceptSpanEntry> intercept_span_table{};
+    std::vector<InterceptSpan> intercept_spans{};
+    std::vector<std::uint64_t> intercept_solo_vas{};
     struct StubEntry {
         std::uint16_t module{};
         std::string name;
@@ -507,13 +568,32 @@ struct SyscallRunState {
     // other module are that module's internals, not sample behavior.
     bool sample_module_known{};
     std::size_t sample_module_index{};
-    // Deterministic virtual time, advanced by executed instructions: drives
-    // RDTSC/RDTSCP answers and the KUSER_SHARED_DATA TickCount fields, so
-    // clock-based delay loops complete in bounded emulation time instead of
-    // hanging on the frozen clock.
-    std::uint64_t virtual_instructions{};
-    std::uint64_t virtual_tsc{};
-    std::uint32_t virtual_ticks{};
+    // Deterministic virtual clock, a pure function of the executed block
+    // count: RDTSC/RDTSCP, the KUSER_SHARED_DATA TickCount fields, the QPC
+    // syscall and the CPUID time leaves all read from `clock` at the current
+    // `blocks` position, so leg layout, host TSC and wall clocks never enter
+    // an answer. The policy is the container's clock block when it carries
+    // one, the engine default otherwise (set once at run assembly).
+    snapshot::ClockPolicy clock{};
+    // The TickCount value last published into KUSER_SHARED_DATA: the block
+    // hook writes the quantized blocks/blocks_per_tick only when it crosses a
+    // threshold, so the memory image reads back the pure function's value
+    // without publishing on every block.
+    std::uint64_t clock_published_ticks{};
+    // The world's host-backed KUSER page (see kLoaderKUser): the publication
+    // channel. Null - worlds without the page skip publishing entirely.
+    std::uint8_t* kuser_host_page{};
+    // The virtual TSC at the current block position (read-time evaluation).
+    std::uint64_t virtual_tsc() const
+    {
+        return clock.base_tsc + clock.tsc_per_block * blocks;
+    }
+    // The virtual TickCount at the current block position (the quantized
+    // pure function; KUSER publishes it at threshold crossings).
+    std::uint32_t virtual_ticks() const
+    {
+        return static_cast<std::uint32_t>(blocks / clock.blocks_per_tick);
+    }
     // Burn-loop fast-forward: a small block cycle spinning with zero
     // guest-visible writes and no syscalls is a delay loop (pure-counter
     // family). The block hook grows hot_run while blocks stay inside the
@@ -537,6 +617,10 @@ struct SyscallRunState {
     std::uint64_t loop_gate_counts[native_gate::kVerdictSlotCount]{};
     bool probe_insn_fired{};
     bool loop_gate_trace{};
+    // Per-rdtsc answer trace ([rdtsc] block position + answer value per
+    // rdtsc/rdtscp), the replay=rerun acceptance channel. Switch from
+    // SHELLER_RDTSC_TRACE, default off: one bool on the hook path.
+    bool rdtsc_trace{};
     std::vector<std::uint64_t> ldr_entry_vas;      // LdrLoadDll handle source
     std::vector<LoaderExportEntry> loader_exports; // all mapped-module exports
     // DLL-input synthetic loading (dll_loader.*): the pending module from a
@@ -645,13 +729,19 @@ struct SyscallRunState {
     bool fidelity_dispatch{};
     seh::SehDispatchState seh;
     // Directory-mode boundary runtime: the
-    // trap stop points (exact-entry hooks), the fired stop's diagnosis, and
+    // trap stop points as constructed, the fired stop's diagnosis, and
     // the explicit API Set resolution context (directory map; empty in the
     // synthetic routes — the runtime DLL binding and the dynamic queries
     // resolve through it instead of the prefix rules).
     std::vector<std::uint64_t> boundary_trap_vas{};
     std::map<std::uint64_t, std::tuple<std::string, std::string, std::uint32_t>>
         boundary_trap_names{};
+    // The trap dispatch index: the surviving VAs sorted and stable-deduplicated
+    // once at apply time, aliases keeping their first row. The same table drives
+    // the trap-owning module selection and the span callback's lookup; the two
+    // tables above stay exactly as constructed, so the named diagnosis keeps
+    // its first-wins spelling.
+    std::vector<TrapSpanEntry> trap_span_table{};
     loader::ApiSetContext api_set_ctx{};
     bool directory_mode{false};
     struct BoundaryTrapDiagnosis {

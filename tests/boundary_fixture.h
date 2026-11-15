@@ -139,6 +139,16 @@ make_boundary_source(const std::vector<BoundaryFixtureExport>& exports)
     }
     put32(0x98 + 112, kBoundaryDirRva);          // export dir RVA
     put32(0x98 + 116, cursor - kBoundaryDirRva); // export dir size
+
+    // data directory [5]: the base-relocation table. The image contains no
+    // absolute fields, so the table holds one padding entry (type 0) - its
+    // presence declares relocatability, which the real-base boundary
+    // derivation requires when the module maps off its preferred base.
+    put32(0x3000, 0);      // block PageRVA 0
+    put32(0x3004, 12);     // block size: header + entry + pad
+    put16(0x3008, 0x0000); // ABSOLUTE padding entry
+    put32(0x98 + 112 + 5 * 8, 0x3000);
+    put32(0x98 + 112 + 5 * 8 + 4, 12);
     return file;
 }
 
@@ -217,7 +227,7 @@ inline std::vector<sheller::loader::BoundaryRule> boundary_fixture_rules()
 // - the value pinned in tools/boundary_manifest/ntdll.x64.json. Tests
 // static_assert against it so a fixture drift cannot pass silently.
 namespace sheller_test {
-inline constexpr std::uint64_t kFixtureNtdllXxhash64 = 0x6c806f42b18c5f46ULL;
+inline constexpr std::uint64_t kFixtureNtdllXxhash64 = 0x594c03e7cec6369aULL;
 } // namespace sheller_test
 
 namespace sheller_test {

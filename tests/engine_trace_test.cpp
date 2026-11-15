@@ -88,7 +88,8 @@ bool traces_enabled()
 {
     return std::getenv("SHELLER_SEH_TRACE") != nullptr ||
            std::getenv("SHELLER_LOOP_GATE_TRACE") != nullptr ||
-           std::getenv("SHELLER_FILE_TRACE") != nullptr;
+           std::getenv("SHELLER_FILE_TRACE") != nullptr ||
+           std::getenv("SHELLER_RDTSC_TRACE") != nullptr;
 }
 
 std::vector<Record> with_marker(const std::string& marker)
@@ -154,6 +155,22 @@ TEST(EngineTrace, LoopGateRunSummary)
     static_cast<void>(sheller::engine::run_snapshot_syscalls(
         sheller_test::craft_snapshot({0xEB, 0xFE}), budget_options()));
     expect_site("[loop-gate] run summary:", "spin run");
+}
+
+TEST(EngineTrace, RdtscAnswerSites)
+{
+    // The clock's per-answer trace: rdtsc and rdtscp each leave one
+    // [rdtsc]/[rdtscp] line per execution (block position + answer value).
+    // Same pair contract as every other site - kDebug with the switch, and
+    // nothing without it (the quiet run of this same binary is the other
+    // half; virtual_clock_test drives the lines' content).
+    install_sink();
+    // rdtsc (0F 31); rdtscp (0F 01 F9); jmp -2 to burn the budget.
+    static_cast<void>(sheller::engine::run_snapshot_syscalls(
+        sheller_test::craft_snapshot({0x0F, 0x31, 0x0F, 0x01, 0xF9, 0xEB, 0xFA}),
+        budget_options()));
+    expect_site("[rdtsc]", "rdtsc run");
+    expect_site("[rdtscp]", "rdtscp run");
 }
 
 TEST(EngineTrace, QuietRunCarriesOnlyTheUngatedRecords)
@@ -316,8 +333,8 @@ int main(int argc, char** argv)
         }
     }
     if (on) {
-        for (const char* name :
-             {"SHELLER_SEH_TRACE", "SHELLER_LOOP_GATE_TRACE", "SHELLER_FILE_TRACE"}) {
+        for (const char* name : {"SHELLER_SEH_TRACE", "SHELLER_LOOP_GATE_TRACE",
+                                 "SHELLER_FILE_TRACE", "SHELLER_RDTSC_TRACE"}) {
 #ifdef _WIN32
             _putenv_s(name, "1");
 #else

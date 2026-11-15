@@ -241,6 +241,12 @@ struct SyscallOutcome {
     bool query_attributes{};
     std::uint64_t attributes_objattr{}; // guest OBJECT_ATTRIBUTES*
     std::uint64_t attributes_out{};     // guest FILE_NETWORK_OPEN_INFORMATION*
+    // kQueryPerformanceCounter: the handler parses the request; the engine
+    // answers the counter from the virtual clock (base + per-block delta at
+    // the current block position) and the frequency from the clock policy.
+    bool query_performance{};
+    std::uint64_t qpc_counter_ptr{};   // guest PLARGE_INTEGER Counter
+    std::uint64_t qpc_frequency_ptr{}; // guest PLARGE_INTEGER Frequency (optional)
 };
 
 class PolicyTable {

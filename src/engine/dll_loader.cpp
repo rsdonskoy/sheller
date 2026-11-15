@@ -316,6 +316,16 @@ std::optional<std::string> synthesize_pending_load(SyscallRunState& state)
              .has_value()) {
         return std::string{"pending module import resolution failed"};
     }
+    // the pending DLL's own delay directory binds eagerly in the same
+    // admission pass: resolvable slots take the final VAs, misses tolerate
+    // (the slot keeps its file bytes - the file's own static failure
+    // thunk); a VA form or out-of-range descriptor fails the load
+    const auto delayed =
+        loader::bind_delayed_imports(*image, resolve_against, &unresolved, state.api_set_ctx,
+                                     std::string_view(pending->name), true);
+    if (!delayed.has_value()) {
+        return std::string{"pending module delayed import binding failed"};
+    }
     if (!unresolved.empty()) {
         return std::format("pending module import unresolved: {}!{}", unresolved.front().dll_name,
                            unresolved.front().function_name);

@@ -1,11 +1,15 @@
 #include "run_apply.h"
 
+#include "boundary_dispatch.h"
 #include "diag_trace.h"
 #include "dll_loader.h"
 #include "engine_hooks.h"
 #include "intercept.h"
+#include "intercept_span_dispatch.h"
 
 #include <unicorn/unicorn.h>
+
+#include <cassert>
 
 namespace sheller::engine {
 
@@ -63,6 +67,10 @@ apply_run_plan(PreparedGuest& guest, const SyscallRunOptions& options, const Fac
     // either way (see SyscallRunState::loop_gate_counts). It is copied into the state
     // because the hook path reads it per probe window.
     state.loop_gate_trace = diag::loop_gate_on();
+    // SHELLER_RDTSC_TRACE: per-rdtsc/rdtscp answer trace (block position +
+    // value), the replay=rerun acceptance channel, as kDebug records. Same
+    // shape as the loop-gate switch: default off, event stream untouched.
+    state.rdtsc_trace = diag::rdtsc_on();
     // DLL-input route: the pending module travels into the run state and the
     // continuation-slot intercept arms (no-op without a pending block -
     // EXE/shellcode runs pay nothing). The arming maps the heap band and the
@@ -91,24 +99,71 @@ apply_run_plan(PreparedGuest& guest, const SyscallRunOptions& options, const Fac
     state.syscall_names = guest_facts.syscall_names;
     state.intercept_names = plan.intercept_names;
     state.intercept_modules = plan.intercept_modules;
+    // The intercept dispatch index and its registration lists, built from the
+    // PLAN's columns (the trap side builds from plan.boundary_trap_vas the
+    // same way). This block sits after the identity assignments on purpose:
+    // the dll early path (arm_dll_resume_slot above) wrote "DllLoadResume"/0
+    // into the state-side identity columns, and the wholesale assignments
+    // replacing them with the plan spelling ("", 0xFFFF sentinel) are what
+    // this consistency check pins - the order is load-bearing, and the index
+    // below reads the plan columns so it never sees the early path's rows.
+    assert(plan.intercept_vas.size() == plan.intercept_ids.size() &&
+           plan.intercept_vas.size() == plan.intercept_names.size() &&
+           plan.intercept_vas.size() == plan.intercept_modules.size());
+    for (std::size_t row = 0; row < plan.intercept_vas.size(); ++row) {
+        if (plan.intercept_modules[row] == kInterceptModuleSentinel) {
+            // Sentinel rows carry no export identity in the plan columns.
+            assert(plan.intercept_names[row].empty());
+        }
+    }
+    state.intercept_span_table = build_intercept_span_table(plan.intercept_vas);
+    // The extent list the span selection groups by: the loader module list
+    // with each record's region-map index resolved the same way the
+    // attribution column resolved it (run_plan's module_index_for_va), so the
+    // geometry and the attribution share one source.
+    std::vector<InterceptModuleExtent> intercept_extents;
+    intercept_extents.reserve(guest.loader_modules.size());
+    for (const auto& mod : guest.loader_modules) {
+        const auto region =
+            guest.map.module_index_by_name(fold_name(std::string_view(mod.name.data())));
+        if (!region.has_value()) {
+            continue;
+        }
+        intercept_extents.push_back({static_cast<std::uint16_t>(*region), mod.base, mod.size});
+    }
+    const auto intercept_selection =
+        select_intercept_spans(plan.intercept_vas, plan.intercept_modules, intercept_extents);
+    state.intercept_spans = std::move(intercept_selection.spans);
+    state.intercept_solo_vas = std::move(intercept_selection.solo_vas);
     state.stub_slots = plan.stub_slots;
     state.stub_entries.clear();
     for (const auto& entry : plan.stub_entries) {
         state.stub_entries.push_back({entry.module, entry.name, 0});
     }
+    // The trap spans this run registers, empty outside directory mode: the
+    // registration-surface trace below reads them.
+    std::vector<TrapSpan> trap_spans{};
     if (plan.directory_mode) {
         state.boundary_trap_vas = plan.boundary_trap_vas;
         state.boundary_trap_names = guest.boundary_trap_names;
         state.directory_mode = true;
         state.api_set_ctx.mode = loader::ApiSetContext::Mode::kDirectoryMap;
         state.api_set_ctx.directory_map = &guest.api_set_map;
-        // One range-bound code hook per surviving trap VA (the plan already
-        // dropped the VAs an intercept supersedes).
-        for (const auto va : plan.boundary_trap_vas) {
+        // One span code hook per trap-owning module instead of one hook per
+        // export (the plan already dropped the VAs an intercept supersedes).
+        // unicorn walks the whole code-hook table for every covered
+        // instruction, and the instruction budget covers every executed
+        // instruction, so per-export hooks taxed the sample's own execution
+        // too. The dispatch index is built once here and searched by the span
+        // callback; the same index selects the modules, so the sample image
+        // and every trap-free module are structurally span-free.
+        state.trap_span_table = build_trap_span_table(plan.boundary_trap_vas);
+        trap_spans = select_trap_spans(state.trap_span_table, state.loader_modules);
+        for (const auto& span : trap_spans) {
             uc_hook trap_hook = 0;
-            const uc_err trap_error =
-                uc_hook_add(guest.unicorn.get(), &trap_hook, UC_HOOK_CODE,
-                            reinterpret_cast<void*>(on_boundary_trap), &state, va, va);
+            const uc_err trap_error = uc_hook_add(guest.unicorn.get(), &trap_hook, UC_HOOK_CODE,
+                                                  reinterpret_cast<void*>(on_boundary_trap_span),
+                                                  &state, span.base, span.base + span.size);
             if (trap_error != UC_ERR_OK) {
                 return std::unexpected(SyscallRunFailure{SyscallRunError::kUnicornFailure,
                                                          static_cast<std::uint32_t>(trap_error),
@@ -117,7 +172,9 @@ apply_run_plan(PreparedGuest& guest, const SyscallRunOptions& options, const Fac
             }
         }
     }
+    std::size_t stub_modules = 0;
     if (plan.needs_stub_hooks) {
+        stub_modules = state.loader_modules.size();
         for (const auto& mod : state.loader_modules) {
             uc_hook stub_hook = 0;
             const uc_err stub_error = uc_hook_add(guest.unicorn.get(), &stub_hook, UC_HOOK_CODE,
@@ -129,6 +186,21 @@ apply_run_plan(PreparedGuest& guest, const SyscallRunOptions& options, const Fac
                                                          {},
                                                          {}});
             }
+        }
+    }
+    // SHELLER_HOOK_TRACE: the code-hook registration surface, once per run.
+    // This is the apply half (traps and stubs); register_run_hooks prints the
+    // other half, and the two sum to the chain unicorn scans per covered
+    // instruction plus the budget's own count hook. Default off: nothing is
+    // rendered and the event stream stays byte-identical.
+    if (diag::wanted(sheller::log::level::kDebug, diag::hook_on())) {
+        diag::emit(sheller::log::level::kDebug, true,
+                   "[hookinv] traps={} unique={} spans={} stubmods={}",
+                   state.boundary_trap_vas.size(), state.trap_span_table.size(), trap_spans.size(),
+                   stub_modules);
+        for (const auto& span : trap_spans) {
+            diag::emit(sheller::log::level::kDebug, true, "[hookinv] span base=0x{:x} size=0x{:x}",
+                       span.base, span.size);
         }
     }
     // Engine dispatch: the trampoline page (int3 marker the callback return

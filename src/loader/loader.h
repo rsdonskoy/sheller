@@ -23,7 +23,10 @@ enum class LoadError {
     kUnsupportedMachine,   // machine is neither AMD64 nor i386
     kUnsupportedOptHeader, // optional header is neither PE32+ nor PE32
     kBadImageSize,         // SizeOfImage missing or beyond the cap
+    kBadHeaders,           // header span (SizeOfHeaders / section table) leaves the image
     kBadReloc,             // relocation block out of range
+    kBadDelayImport,       // delay-import descriptor out of range or VA-addressed
+    kBadImport,            // malformed ordinary import directory or thunk
 };
 
 std::string_view load_error_message(LoadError error);
@@ -52,6 +55,8 @@ struct ImageInfo {
     std::uint32_t tls_directory_size{};
     std::uint32_t reloc_directory_rva{};
     std::uint32_t reloc_directory_size{};
+    std::uint32_t size_of_headers{}; // the PE's own SizeOfHeaders declaration
+    std::uint32_t table_end_rva{};   // first offset past the section table
     std::vector<SectionInfo> sections;
 };
 
