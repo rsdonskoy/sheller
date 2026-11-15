@@ -3,6 +3,7 @@
 #include "diag_trace.h"
 #include "dll_loader.h"
 #include "engine_hooks.h"
+#include "intercept_span_dispatch.h"
 
 #include "../loader/imports.h"
 #include "../loader/loader.h"
@@ -965,102 +966,110 @@ void on_rtl_unwind_ex(uc_engine* const uc, [[maybe_unused]] const std::uint64_t 
     uc_emu_stop(uc);
 }
 
-// dispatch by the intercepted entry address (linear over <= 16 entries)
+// dispatch by the intercepted entry address: one binary search over the
+// sorted dispatch index. The span hooks fire on every instruction of every
+// intercept-owning module, so a miss is the common case, not an anomaly:
+// return before touching any uc_ call or run state, and let the instruction
+// run. A hit dispatches through the ORIGINAL row the index kept - never the
+// row's position in the table - because the identity columns are row-aligned
+// with the plan's intercept list.
 void on_intercept([[maybe_unused]] uc_engine* uc, const std::uint64_t address, const std::uint32_t,
                   void* const user_data)
 {
     auto* state = static_cast<SyscallRunState*>(user_data);
-    for (std::size_t i = 0; i < state->intercept_vas.size(); ++i) {
-        if (state->intercept_vas[i] == address) {
-            // identity for the event emitted in intercept_return
-            state->pending_intercept = static_cast<std::int32_t>(i);
-            const auto id = static_cast<InterceptId>(state->intercept_ids[i]);
-            switch (id) {
-            case InterceptId::kVirtualAlloc:
-                intercept_virtual_alloc(*state);
-                break;
-            case InterceptId::kVirtualProtect:
-                intercept_virtual_protect(*state);
-                break;
-            case InterceptId::kVirtualFree:
-                intercept_virtual_free(*state);
-                break;
-            case InterceptId::kLoadLibraryA:
-            case InterceptId::kLoadLibraryW:
-                intercept_load_library(*state, id == InterceptId::kLoadLibraryW);
-                break;
-            case InterceptId::kDllLoadResume:
-                dll_load_resume(*state);
-                break;
-            case InterceptId::kDisableThreadLibraryCalls:
-                intercept_disable_thread_library_calls(*state);
-                break;
-            case InterceptId::kGetStdHandle:
-                intercept_get_std_handle(*state);
-                break;
-            case InterceptId::kInitializeCriticalSection:
-            case InterceptId::kInitializeCriticalSectionAndSpinCount:
-            case InterceptId::kEnterCriticalSection:
-            case InterceptId::kLeaveCriticalSection:
-            case InterceptId::kDeleteCriticalSection:
-                intercept_critical_section(*state, id);
-                break;
-            case InterceptId::kFlsAlloc:
-            case InterceptId::kFlsFree:
-            case InterceptId::kFlsSetValue:
-            case InterceptId::kFlsGetValue:
-            case InterceptId::kTlsAlloc:
-            case InterceptId::kTlsFree:
-            case InterceptId::kTlsSetValue:
-            case InterceptId::kTlsGetValue:
-            case InterceptId::kAddVectoredExceptionHandler:
-            case InterceptId::kRemoveVectoredExceptionHandler:
-                intercept_fls_tls(*state, id);
-                break;
-            case InterceptId::kGetProcAddress:
-                intercept_get_proc_address(*state);
-                break;
-            case InterceptId::kGetModuleHandleA:
-            case InterceptId::kGetModuleHandleW:
-                intercept_get_module_handle(*state, id == InterceptId::kGetModuleHandleW);
-                break;
-            case InterceptId::kExitProcess:
-                intercept_exit_process(*state);
-                break;
-            case InterceptId::kRtlAllocateHeap:
-                intercept_rtl_allocate_heap(*state);
-                break;
-            case InterceptId::kRtlFreeHeap:
-                intercept_rtl_free_heap(*state);
-                break;
-            case InterceptId::kRtlReAllocateHeap:
-                intercept_rtl_re_allocate_heap(*state);
-                break;
-            case InterceptId::kRtlCreateHeap:
-                intercept_rtl_create_heap(*state);
-                break;
-            case InterceptId::kRtlDestroyHeap:
-                intercept_rtl_destroy_heap(*state);
-                break;
-            case InterceptId::kRtlSizeHeap:
-                intercept_rtl_size_heap(*state);
-                break;
-            case InterceptId::kLdrLoadDll:
-                intercept_ldr_load_dll(*state);
-                break;
-            case InterceptId::kRegOpenKeyEx:
-                intercept_reg_open(*state, state->intercept_names[i].back() == 'W');
-                break;
-            case InterceptId::kRegQueryValueEx:
-                intercept_reg_query(*state);
-                break;
-            case InterceptId::kRegCloseKey:
-                intercept_reg_close(*state);
-                break;
-            case InterceptId::kStrlen:
-                intercept_strlen(*state);
-                break;
-            }
+    const auto* entry = find_intercept_span_entry(state->intercept_span_table, address);
+    if (entry == nullptr) {
+        return; // not an intercepted entry: no side effects
+    }
+    {
+        // identity for the event emitted in intercept_return
+        const auto row = entry->row;
+        state->pending_intercept = static_cast<std::int32_t>(row);
+        const auto id = static_cast<InterceptId>(state->intercept_ids[row]);
+        switch (id) {
+        case InterceptId::kVirtualAlloc:
+            intercept_virtual_alloc(*state);
+            break;
+        case InterceptId::kVirtualProtect:
+            intercept_virtual_protect(*state);
+            break;
+        case InterceptId::kVirtualFree:
+            intercept_virtual_free(*state);
+            break;
+        case InterceptId::kLoadLibraryA:
+        case InterceptId::kLoadLibraryW:
+            intercept_load_library(*state, id == InterceptId::kLoadLibraryW);
+            break;
+        case InterceptId::kDllLoadResume:
+            dll_load_resume(*state);
+            break;
+        case InterceptId::kDisableThreadLibraryCalls:
+            intercept_disable_thread_library_calls(*state);
+            break;
+        case InterceptId::kGetStdHandle:
+            intercept_get_std_handle(*state);
+            break;
+        case InterceptId::kInitializeCriticalSection:
+        case InterceptId::kInitializeCriticalSectionAndSpinCount:
+        case InterceptId::kEnterCriticalSection:
+        case InterceptId::kLeaveCriticalSection:
+        case InterceptId::kDeleteCriticalSection:
+            intercept_critical_section(*state, id);
+            break;
+        case InterceptId::kFlsAlloc:
+        case InterceptId::kFlsFree:
+        case InterceptId::kFlsSetValue:
+        case InterceptId::kFlsGetValue:
+        case InterceptId::kTlsAlloc:
+        case InterceptId::kTlsFree:
+        case InterceptId::kTlsSetValue:
+        case InterceptId::kTlsGetValue:
+        case InterceptId::kAddVectoredExceptionHandler:
+        case InterceptId::kRemoveVectoredExceptionHandler:
+            intercept_fls_tls(*state, id);
+            break;
+        case InterceptId::kGetProcAddress:
+            intercept_get_proc_address(*state);
+            break;
+        case InterceptId::kGetModuleHandleA:
+        case InterceptId::kGetModuleHandleW:
+            intercept_get_module_handle(*state, id == InterceptId::kGetModuleHandleW);
+            break;
+        case InterceptId::kExitProcess:
+            intercept_exit_process(*state);
+            break;
+        case InterceptId::kRtlAllocateHeap:
+            intercept_rtl_allocate_heap(*state);
+            break;
+        case InterceptId::kRtlFreeHeap:
+            intercept_rtl_free_heap(*state);
+            break;
+        case InterceptId::kRtlReAllocateHeap:
+            intercept_rtl_re_allocate_heap(*state);
+            break;
+        case InterceptId::kRtlCreateHeap:
+            intercept_rtl_create_heap(*state);
+            break;
+        case InterceptId::kRtlDestroyHeap:
+            intercept_rtl_destroy_heap(*state);
+            break;
+        case InterceptId::kRtlSizeHeap:
+            intercept_rtl_size_heap(*state);
+            break;
+        case InterceptId::kLdrLoadDll:
+            intercept_ldr_load_dll(*state);
+            break;
+        case InterceptId::kRegOpenKeyEx:
+            intercept_reg_open(*state, state->intercept_names[row].back() == 'W');
+            break;
+        case InterceptId::kRegQueryValueEx:
+            intercept_reg_query(*state);
+            break;
+        case InterceptId::kRegCloseKey:
+            intercept_reg_close(*state);
+            break;
+        case InterceptId::kStrlen:
+            intercept_strlen(*state);
             break;
         }
     }

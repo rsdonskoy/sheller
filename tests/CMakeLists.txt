@@ -560,6 +560,30 @@ sheller_apply_common(boundary_dispatch_test)
 
 add_test(NAME boundary_dispatch COMMAND boundary_dispatch_test)
 
+# Intercept span dispatch: the dispatch index and the span/solo registration
+# split, over hand-built tables (no unicorn, no corpus).
+add_executable(intercept_span_dispatch_test intercept_span_dispatch_test.cpp)
+target_include_directories(intercept_span_dispatch_test PRIVATE
+  "${CMAKE_CURRENT_SOURCE_DIR}/../src/engine")
+target_include_directories(intercept_span_dispatch_test SYSTEM PRIVATE
+  ${SHELLER_UNICORN_INCLUDE_DIR})
+target_link_libraries(intercept_span_dispatch_test PRIVATE GTest::gtest_main sheller_engine)
+sheller_apply_common(intercept_span_dispatch_test)
+
+add_test(NAME intercept_span_dispatch COMMAND intercept_span_dispatch_test)
+
+# The intercept callback's two branches (miss no-op, hit dispatch) against a
+# live engine instance.
+add_executable(intercept_callback_test intercept_callback_test.cpp)
+target_include_directories(intercept_callback_test PRIVATE
+  "${CMAKE_CURRENT_SOURCE_DIR}/../src/engine")
+target_include_directories(intercept_callback_test SYSTEM PRIVATE
+  ${SHELLER_UNICORN_INCLUDE_DIR})
+target_link_libraries(intercept_callback_test PRIVATE GTest::gtest_main sheller_engine)
+sheller_apply_common(intercept_callback_test)
+
+add_test(NAME intercept_callback COMMAND intercept_callback_test)
+
 # Synthetic DLL load transactions: no host process or system DLL fixtures.
 add_executable(dll_loader_test dll_loader_test.cpp)
 target_include_directories(dll_loader_test PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/../src/engine")

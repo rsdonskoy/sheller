@@ -691,9 +691,10 @@ TEST(LoaderDirectory, TrapAliasRowsStopOnceWithTheFirstName)
     fs::remove(sample_path, ec);
 }
 
-// An intercept on the trap VA still wins over the span form: the plan drops
-// that VA, the dispatch index is empty, no span is registered at all, and the
-// engine answers the call instead of the trap stopping the run.
+// An intercept on the trap VA still wins over the trap: the plan drops that
+// VA from the trap list, the intercept dispatches through the intercept side
+// (its own module span under the span form), and the engine answers the call
+// instead of the trap stopping the run.
 TEST(LoaderDirectory, InterceptOnATrapVaRegistersNoSpan)
 {
     const auto kernel32_source = make_real_kernel32_source();
@@ -722,6 +723,61 @@ TEST(LoaderDirectory, InterceptOnATrapVaRegistersNoSpan)
     ASSERT_TRUE(run.has_value()) << run.error().detail;
     EXPECT_TRUE(run->terminated);
     EXPECT_EQ(run->syscalls, 0u); // the intercept answered, no syscall ran
+    std::error_code ec;
+    fs::remove(sample_path, ec);
+}
+
+// The intercept span form, the mirror of TrapSpanMissesThenHits: an intercept
+// owns ntdll (a declared intercept on the NtTerminateProcess export), so a
+// span is registered over the module and the sample's path first runs a
+// non-entry instruction inside it - ntdll!NtCreateFile, whose real stub bytes
+// execute inside the span and miss the dispatch index (the answered syscall
+// is the proof those instructions ran, with nothing else disturbed) - then
+// hits the intercepted entry and terminates through the engine answer.
+TEST(LoaderDirectory, InterceptSpanMissesThenHitsInTheSameModule)
+{
+    const auto kernel32_source = make_real_kernel32_source();
+    constexpr std::uint32_t kNtdllCreateFileSlot = sheller_test::kImportingIatRva + 64;
+    constexpr std::uint32_t kNtdllHitSlot = sheller_test::kImportingIatRva + 72;
+    std::vector<std::uint8_t> entry_body;
+    const auto emit_call = [&](const std::uint32_t slot) {
+        auto bytes = call_through(
+            sheller_test::kBoundaryTextRva + static_cast<std::uint32_t>(entry_body.size()), slot);
+        bytes.pop_back(); // the helper's ret: this entry chains two calls
+        entry_body.insert(entry_body.end(), bytes.begin(), bytes.end());
+    };
+    emit_call(kNtdllCreateFileSlot); // a real stub: executes inside the span, a miss
+    emit_call(kNtdllHitSlot);        // the intercepted entry: the hit
+    entry_body.push_back(0xEB);
+    entry_body.push_back(0xFE); // unreachable unless the intercept failed to fire
+    const auto sample = make_importing_source(
+        {{"entry", nullptr, sheller_test::kBoundaryTextRva, entry_body, {}}},
+        {{"kernel32.dll", {"SampleExport"}}, {"ntdll.dll", {"NtCreateFile", "NtWeird"}}});
+    const auto sample_path = fs::temp_directory_path() / "sheller_dir_mode_ispan_miss.exe";
+    write_bytes(sample_path, sample);
+
+    const auto dir = make_directory("ispanmiss", {{"kernel32.dll", kernel32_source}});
+    auto guest = sheller::engine::prepare_pe_file(sample_path.string(), false, {}, dir, false);
+    ASSERT_TRUE(guest.has_value()) << rejection_detail(guest);
+    // The declared intercept: ntdll owns it, so the run registers one span
+    // over the module instead of a per-entry hook. NtWeird is the trap export;
+    // the intercept supersedes the trap (the trap VA drops from the trap
+    // list) and the span dispatch answers the call instead.
+    const auto weird = std::find_if(guest->loader_exports.begin(), guest->loader_exports.end(),
+                                    [](const auto& entry) { return entry.name == "NtWeird"; });
+    ASSERT_NE(weird, guest->loader_exports.end());
+    guest->intercepts.emplace_back(
+        weird->function_va, static_cast<std::uint32_t>(sheller::engine::InterceptId::kExitProcess));
+
+    sheller::engine::SyscallRunOptions options;
+    options.system_modules_dir = dir;
+    options.max_instructions = 20000;
+    const auto run = sheller::engine::run_syscalls(*guest, options, {});
+    ASSERT_TRUE(run.has_value()) << run.error().detail;
+    EXPECT_TRUE(run->terminated);
+    // exactly one syscall: the miss branch executed the stub inside the span,
+    // the hit answered the call and stopped the run before anything else
+    EXPECT_EQ(run->syscalls, 1u);
     std::error_code ec;
     fs::remove(sample_path, ec);
 }

@@ -5,8 +5,11 @@
 #include "dll_loader.h"
 #include "engine_hooks.h"
 #include "intercept.h"
+#include "intercept_span_dispatch.h"
 
 #include <unicorn/unicorn.h>
+
+#include <cassert>
 
 namespace sheller::engine {
 
@@ -96,6 +99,42 @@ apply_run_plan(PreparedGuest& guest, const SyscallRunOptions& options, const Fac
     state.syscall_names = guest_facts.syscall_names;
     state.intercept_names = plan.intercept_names;
     state.intercept_modules = plan.intercept_modules;
+    // The intercept dispatch index and its registration lists, built from the
+    // PLAN's columns (the trap side builds from plan.boundary_trap_vas the
+    // same way). This block sits after the identity assignments on purpose:
+    // the dll early path (arm_dll_resume_slot above) wrote "DllLoadResume"/0
+    // into the state-side identity columns, and the wholesale assignments
+    // replacing them with the plan spelling ("", 0xFFFF sentinel) are what
+    // this consistency check pins - the order is load-bearing, and the index
+    // below reads the plan columns so it never sees the early path's rows.
+    assert(plan.intercept_vas.size() == plan.intercept_ids.size() &&
+           plan.intercept_vas.size() == plan.intercept_names.size() &&
+           plan.intercept_vas.size() == plan.intercept_modules.size());
+    for (std::size_t row = 0; row < plan.intercept_vas.size(); ++row) {
+        if (plan.intercept_modules[row] == kInterceptModuleSentinel) {
+            // Sentinel rows carry no export identity in the plan columns.
+            assert(plan.intercept_names[row].empty());
+        }
+    }
+    state.intercept_span_table = build_intercept_span_table(plan.intercept_vas);
+    // The extent list the span selection groups by: the loader module list
+    // with each record's region-map index resolved the same way the
+    // attribution column resolved it (run_plan's module_index_for_va), so the
+    // geometry and the attribution share one source.
+    std::vector<InterceptModuleExtent> intercept_extents;
+    intercept_extents.reserve(guest.loader_modules.size());
+    for (const auto& mod : guest.loader_modules) {
+        const auto region =
+            guest.map.module_index_by_name(fold_name(std::string_view(mod.name.data())));
+        if (!region.has_value()) {
+            continue;
+        }
+        intercept_extents.push_back({static_cast<std::uint16_t>(*region), mod.base, mod.size});
+    }
+    const auto intercept_selection =
+        select_intercept_spans(plan.intercept_vas, plan.intercept_modules, intercept_extents);
+    state.intercept_spans = std::move(intercept_selection.spans);
+    state.intercept_solo_vas = std::move(intercept_selection.solo_vas);
     state.stub_slots = plan.stub_slots;
     state.stub_entries.clear();
     for (const auto& entry : plan.stub_entries) {

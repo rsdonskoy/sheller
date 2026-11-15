@@ -315,9 +315,10 @@ std::expected<void, SyscallRunFailure> run_tls_callback_legs(PreparedGuest& gues
 
 // Registers the run-scoped unicorn hooks: the diagnostic windows, the
 // syscall/cpuid/rdtsc instruction hooks, the behavior monitored windows,
-// the block/intr/invalid-memory hooks, the per-intercept entry hooks and
-// the C++ accept takeover on ntdll!RtlUnwindEx. The write-prot hook stays
-// with the caller (it needs the caller-owned ledger).
+// the block/intr/invalid-memory hooks, the per-module intercept spans plus
+// the per-row solo hooks and the C++ accept takeover on ntdll!RtlUnwindEx.
+// The write-prot hook stays with the caller (it needs the caller-owned
+// ledger).
 std::expected<void, SyscallRunFailure> register_run_hooks(PreparedGuest& guest,
                                                           const SyscallRunOptions& options,
                                                           SyscallRunState& state,
@@ -444,13 +445,32 @@ std::expected<void, SyscallRunFailure> register_run_hooks(PreparedGuest& guest,
     }
 
     // Loader-route API interception: one range-bound code hook per
-    // intercepted entry, all sharing the by-address dispatcher.
-    for (std::size_t i = 0; i < state.intercept_vas.size(); ++i) {
+    // intercept-owning module plus one 1-byte hook per solo row (sentinel
+    // attribution, or a row the selected spans fail to cover exactly once),
+    // all sharing the by-address dispatcher. The apply stage built both lists
+    // under the coverage hard invariant: every intercept row is registered
+    // either through its module's span or as its own hook - a silently
+    // dropped intercept is structurally unreachable. No arch/mode branch and
+    // no module-name or fixed-base special case: the lists are all the
+    // registration site knows.
+    for (const auto& span : state.intercept_spans) {
         uc_hook api_hook = 0;
-        if (uc_hook_add(guest.unicorn.get(), &api_hook, UC_HOOK_CODE,
-                        reinterpret_cast<void*>(on_intercept), &state, state.intercept_vas[i],
-                        state.intercept_vas[i] + 1) != UC_ERR_OK) {
-            return std::unexpected(SyscallRunFailure{SyscallRunError::kUnicornFailure, {}, {}, {}});
+        const uc_err api_error = uc_hook_add(guest.unicorn.get(), &api_hook, UC_HOOK_CODE,
+                                             reinterpret_cast<void*>(on_intercept), &state,
+                                             span.base, span.base + span.size);
+        if (api_error != UC_ERR_OK) {
+            return std::unexpected(SyscallRunFailure{
+                SyscallRunError::kUnicornFailure, static_cast<std::uint32_t>(api_error), {}, {}});
+        }
+    }
+    for (const auto va : state.intercept_solo_vas) {
+        uc_hook api_hook = 0;
+        const uc_err api_error =
+            uc_hook_add(guest.unicorn.get(), &api_hook, UC_HOOK_CODE,
+                        reinterpret_cast<void*>(on_intercept), &state, va, va + 1);
+        if (api_error != UC_ERR_OK) {
+            return std::unexpected(SyscallRunFailure{
+                SyscallRunError::kUnicornFailure, static_cast<std::uint32_t>(api_error), {}, {}});
         }
     }
 
@@ -480,13 +500,15 @@ std::expected<void, SyscallRunFailure> register_run_hooks(PreparedGuest& guest,
         }
     }
     // SHELLER_HOOK_TRACE: the code-hook half registered here. The apply stage
-    // printed the trap/stub half; together with the budget's own count hook
-    // the two lines are the chain unicorn scans per covered instruction.
+    // printed the trap/stub half; the intercepts count is the intercept table
+    // length N and spans+solo is the hook count this half adds for them, so
+    // with the budget's own count hook the two lines still read as one chain.
     if (diag::wanted(sheller::log::level::kDebug, diag::hook_on())) {
         diag::emit(sheller::log::level::kDebug, true,
-                   "[hookinv] code: diag={} behavior={} intercepts={} unwind={}",
+                   "[hookinv] code: diag={} behavior={} intercepts={} spans={} solo={} unwind={}",
                    diag_code_registered ? 1 : 0, behavior_code_registered ? 1 : 0,
-                   state.intercept_vas.size(), unwind_registered ? 1 : 0);
+                   state.intercept_vas.size(), state.intercept_spans.size(),
+                   state.intercept_solo_vas.size(), unwind_registered ? 1 : 0);
     }
     return {};
 }

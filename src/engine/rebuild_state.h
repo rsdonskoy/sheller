@@ -14,6 +14,7 @@
 #include "boundary_dispatch.h"
 #include "boundary_metadata.h"
 #include "exception_layout.h"
+#include "intercept_span_dispatch.h"
 #include "mem_region_map.h"
 #include "native_gate.h"
 #include "seh_dispatcher.h"
@@ -495,6 +496,17 @@ struct SyscallRunState {
     std::vector<std::string> intercept_names;
     std::vector<std::uint16_t> intercept_modules;
     std::int32_t pending_intercept{-1};
+    // The intercept dispatch index and its registration lists, built once at
+    // apply time from the plan's columns (the same spelling the trap side
+    // builds from plan.boundary_trap_vas): the sorted VA table the span and
+    // solo callbacks binary-search, one span per intercept-owning module, and
+    // the rows that keep an individual hook - sentinel rows, plus any
+    // non-sentinel row the selected spans fail to cover exactly once, so a
+    // silently dropped intercept is structurally unreachable. The identity
+    // columns above stay exactly as constructed, indexed by original row.
+    std::vector<InterceptSpanEntry> intercept_span_table{};
+    std::vector<InterceptSpan> intercept_spans{};
+    std::vector<std::uint64_t> intercept_solo_vas{};
     struct StubEntry {
         std::uint16_t module{};
         std::string name;

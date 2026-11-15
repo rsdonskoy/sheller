@@ -420,9 +420,13 @@ unless you say otherwise - so setting a variable alone changes nothing.
 `SHELLER_HOOK_TRACE` prints the code-hook registration inventory once per run: the
 trap/stub half at apply time (`[hookinv] traps=N unique=N spans=N stubmods=N`, then
 one line per registered span) and the intercept/window half at hook registration
-(`[hookinv] code: diag=N behavior=N intercepts=N unwind=N`). The two lines sum to the
-chain unicorn scans for every covered instruction, which is what makes a
-registration-form change measurable without a probe build.
+(`[hookinv] code: diag=N behavior=N intercepts=N spans=N solo=N unwind=N`, where
+`intercepts` is the intercept table length and `spans + solo` is the hook count that
+half registers for it: one span per intercept-owning module plus one individual hook
+per row the spans fail to cover). The trap span count on the first line and the
+intercept span and solo counts on the second sum - with the windows and the budget's
+own count hook - to the chain unicorn scans for every covered instruction, which is
+what makes a registration-form change measurable without a probe build.
 
 ```bash
 SHELLER_LOOP_GATE_TRACE=1 sheller run sample.snap --from-snapshot --log-level debug
