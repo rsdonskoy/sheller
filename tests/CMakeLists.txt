@@ -976,6 +976,13 @@ endif()
   add_test(NAME world_diff_regression
     COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/world_diff_regression.py")
 
+  # Product-level parity diff (tools/product_diff.py): verified-identity
+  # cause classification over synthetic image-form product pairs - the two
+  # world-binding shapes, the five recovery-content negative shapes, the two
+  # cause-uncertain shapes, exit-code agreement, and the named rejections.
+  add_test(NAME product_diff_regression
+    COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/product_diff_regression.py")
+
   # Equivalence-baseline machine adjudication (accepted-residuals gate):
   # the happy path, unaccepted classes, scale-cap overruns and structural
   # shape anchors (negative cases). Portable by design.
