@@ -124,8 +124,10 @@ four-kind classification, the counting whitelist, compat answers) ride an
 address-level runtime table; image rewrites are limited to an explicit
 whitelist - the reserved DOS `e_res2` marker slot, data-export slots whose
 mapped bytes are free, and manifest-defined stub bodies. The host's system
-directories are never read. You supply the DLLs; their license is your
-responsibility.
+directories are never read - not at construction and not at run time: a
+`\KnownDlls\<name>` section view served during the run carries the world's
+own resident image bytes (relocated for the view base), on every host. You
+supply the DLLs; their license is your responsibility.
 
 Strictness is the contract: a closure member the directory lacks is a named
 construction rejection, and `--system-modules-fallback` opts into pulling such
@@ -202,6 +204,37 @@ accepted class within its position bounds and scale caps, structural-shape
 classes are rejected outright, and the negative cases prove the gate fails on
 unaccepted classes). Same input pair, byte-identical report; the engine, CLI
 and snapshot format are untouched.
+
+### Product-level parity diff (development tool)
+
+`tools/product_diff.py` is the product-face sibling of the world diff harness:
+it diffs two image-form unpack products of the same sample (the repaired copy's
+shape the capture route ships and the craft route now reaches) over the whole
+image and classifies every differing aligned 8-byte slot by VERIFIED identity,
+never span membership - `world-binding` only when the slot's identity and both
+sides' targets correspond (standard IAT slots by normalized module/export
+identity on both sides, with the tool's own OriginalFirstThunk-anchored
+coverage walk so legitimate zero-thunk holes cannot truncate the slot set;
+repaired name-record slots only when the record's export name - four
+characters minimum, case-folded - is corroborated by at least one world's
+export-name set), `recovery-content` for anything else (one-sided span hits,
+same module with a different target, different modules, address-shaped
+ordinary bytes including record-shaped bytes no world corroborates, known
+slots bound wrong), and `cause-uncertain` when a side's identity is unreadable
+(in-module value with no terminating export, or a world region with no
+applicable target-mapping evidence). Image-internal positions need no
+classifier branch: equal bases read equal, unequal bases fail the shape gate.
+Products must be the full virtual-layout image (a size that differs from
+SizeOfImage is a named rejection). Each side needs its world as a snapshot
+container (parsed with the world diff reader) or an equivalent hashed module
+table (JSON schema 2: explicit bases and exports, and image files bound by a
+mandatory sha256 the tool verifies - a drifted source image is a named
+rejection, never a silently different world). Exit 0 only when no
+recovery-content and no cause-uncertain row exists and the shape checks
+(image base, sizes, section table, entry point, import directory) pass; 1
+otherwise; 2 on named input rejection. Per-section rows plus the explicit
+header-and-gaps row make the report's identity coverage complete and
+auditable.
 
 ## Input support: bitness, DLLs, shellcode
 

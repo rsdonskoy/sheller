@@ -22,6 +22,7 @@
 #include <gtest/gtest.h>
 
 #include "test_temp.hpp"
+#include <algorithm>
 #include <array>
 #include <cstdint>
 #include <cstdio>
@@ -31,6 +32,7 @@
 #include <span>
 #include <sstream>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace {
@@ -598,6 +600,234 @@ TEST_F(RepairDumpEnv, OriginalDumpUntouched)
         std::ifstream in(bin, std::ios::binary);
         return std::string((std::istreambuf_iterator<char>(in)), {});
     }());
+}
+
+namespace {
+
+// Reads a whole file as bytes (repaired copies, snapshots).
+std::vector<std::uint8_t> read_whole(const fs::path& path)
+{
+    std::ifstream in(path, std::ios::binary);
+    return {std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>()};
+}
+
+// Byte-compares two repair output trees: same file set, same bytes.
+void expect_same_output_trees(const fs::path& a_dir, const fs::path& b_dir)
+{
+    ASSERT_TRUE(fs::exists(a_dir)) << a_dir;
+    ASSERT_TRUE(fs::exists(b_dir)) << b_dir;
+    std::vector<std::string> names;
+    for (const auto& entry : fs::directory_iterator(a_dir)) {
+        names.push_back(entry.path().filename().string());
+    }
+    std::sort(names.begin(), names.end());
+    ASSERT_FALSE(names.empty()) << a_dir << " produced no repaired copies";
+    for (const auto& name : names) {
+        ASSERT_TRUE(fs::exists(b_dir / name)) << name << " missing from " << b_dir;
+        EXPECT_EQ(read_whole(a_dir / name), read_whole(b_dir / name)) << name;
+    }
+    std::vector<std::string> b_names;
+    for (const auto& entry : fs::directory_iterator(b_dir)) {
+        b_names.push_back(entry.path().filename().string());
+    }
+    std::sort(b_names.begin(), b_names.end());
+    EXPECT_EQ(names, b_names) << "output file sets differ";
+}
+
+// Field-by-field structural equality of two thunk lists (UncoveredThunk is
+// an aggregate without a synthesized operator==).
+void expect_thunk_lists_equal(const std::vector<unpack::UncoveredThunk>& a,
+                              const std::vector<unpack::UncoveredThunk>& b, const char* what,
+                              const std::size_t region)
+{
+    ASSERT_EQ(a.size(), b.size()) << what << " region " << region;
+    for (std::size_t i = 0; i < a.size(); ++i) {
+        EXPECT_EQ(a[i].rva, b[i].rva) << what << " region " << region << " entry " << i;
+        EXPECT_EQ(a[i].va, b[i].va) << what << " region " << region << " entry " << i;
+    }
+}
+
+// Field-by-field structural equality of two repairs' region reports.
+void expect_regions_equal(const std::vector<unpack::RegionRepairReport>& a,
+                          const std::vector<unpack::RegionRepairReport>& b)
+{
+    ASSERT_EQ(a.size(), b.size());
+    for (std::size_t i = 0; i < a.size(); ++i) {
+        const auto& x = a[i];
+        const auto& y = b[i];
+        EXPECT_EQ(x.base, y.base) << "region " << i;
+        EXPECT_EQ(x.size, y.size) << "region " << i;
+        EXPECT_EQ(x.verdict, y.verdict) << "region " << i;
+        EXPECT_EQ(x.truncated, y.truncated) << "region " << i;
+        EXPECT_EQ(x.expected_bytes, y.expected_bytes) << "region " << i;
+        EXPECT_EQ(x.actual_bytes, y.actual_bytes) << "region " << i;
+        EXPECT_EQ(x.first_dirty_page, y.first_dirty_page) << "region " << i;
+        expect_thunk_lists_equal(x.uncovered, y.uncovered, "uncovered", i);
+        expect_thunk_lists_equal(x.residual_abs_va, y.residual_abs_va, "residual", i);
+        EXPECT_EQ(x.detail, y.detail) << "region " << i;
+    }
+}
+
+// Field-by-field structural equality of two repair summaries.
+void expect_summaries_equal(const unpack::RepairSummary& a, const unpack::RepairSummary& b)
+{
+    expect_regions_equal(a.regions, b.regions);
+    EXPECT_EQ(a.oep_found, b.oep_found);
+    EXPECT_EQ(a.oep_va, b.oep_va);
+    EXPECT_EQ(a.oep_rva, b.oep_rva);
+}
+
+} // namespace
+
+// Route symmetry, equivalent-input determinism: the same valid inputs (the
+// snapshot's module map and export bytes, its repairable page bytes, the same
+// dump/manifest content) expressed in the two container forms repair_dump
+// accepts - the snapshot file (path form, the run --dump flow) and the same
+// bytes in memory (the one-shot unpack flow's form) - must produce identical
+// repaired copies and identical structured verdicts.
+TEST_F(RepairDumpEnv, EquivalentContainerFormsRepairIdentically)
+{
+    auto snapshot_bytes = read_whole(snapshot_);
+    ASSERT_FALSE(snapshot_bytes.empty());
+
+    const auto out_bytes = dir_ / "out_bytes";
+    const auto by_path = unpack::repair_dump(snapshot_, dump_, out_);
+    ASSERT_TRUE(by_path.has_value())
+        << "path-form repair error=" << static_cast<int>(by_path.error());
+    const auto by_bytes = unpack::repair_dump(snapshot_bytes, dump_, out_bytes);
+    ASSERT_TRUE(by_bytes.has_value())
+        << "bytes-form repair error=" << static_cast<int>(by_bytes.error());
+    expect_summaries_equal(*by_path, *by_bytes);
+    expect_same_output_trees(out_, out_bytes);
+
+    // The dump directory is only ever read, in both forms.
+    const auto dump_fingerprint = [&] {
+        std::vector<std::pair<std::string, std::vector<std::uint8_t>>> files;
+        for (const auto& entry : fs::directory_iterator(dump_)) {
+            files.emplace_back(entry.path().filename().string(), read_whole(entry.path()));
+        }
+        std::sort(files.begin(), files.end());
+        return files;
+    };
+    const auto before = dump_fingerprint();
+    static_cast<void>(unpack::repair_dump(snapshot_, dump_, dir_ / "out_again_path"));
+    static_cast<void>(unpack::repair_dump(snapshot_bytes, dump_, dir_ / "out_again_bytes"));
+    EXPECT_EQ(before, dump_fingerprint()) << "the dump directory changed under repair";
+    // Cross-run determinism: the second repair over the same inputs must
+    // reproduce the first run's copies exactly (both container forms).
+    expect_same_output_trees(out_, dir_ / "out_again_path");
+    expect_same_output_trees(out_bytes, dir_ / "out_again_bytes");
+
+    // World-source attribution: the repaired complete region's import table
+    // must carry the identities the snapshot's OWN module map resolved. The
+    // names live nowhere but the snapshot world ("fake.dll" exports
+    // "fake_export" from the crafted image; no host catalog has them), so a
+    // host-directory read could never produce this repair.
+    const auto repaired = read_whole(out_ / "repaired_0000000040000000.exe");
+    ASSERT_GE(repaired.size(), 0x3000U);
+    const auto r32 = [&repaired](const std::size_t at) {
+        return static_cast<std::uint32_t>(repaired[at]) |
+               (static_cast<std::uint32_t>(repaired[at + 1]) << 8) |
+               (static_cast<std::uint32_t>(repaired[at + 2]) << 16) |
+               (static_cast<std::uint32_t>(repaired[at + 3]) << 24);
+    };
+    const auto e_lfanew = r32(0x3C);
+    ASSERT_EQ(repaired[e_lfanew], 'P');
+    const auto import_rva = r32(e_lfanew + 0x18 + 0x70 + 8); // DataDirectory[1]
+    ASSERT_NE(import_rva, 0U);
+    ASSERT_LT(import_rva + 20U, repaired.size());
+    const auto name_rva = r32(import_rva + 12);
+    const auto first_thunk = r32(import_rva + 16);
+    ASSERT_NE(name_rva, 0U);
+    ASSERT_NE(first_thunk, 0U);
+    ASSERT_LT(name_rva + 8U, repaired.size());
+    ASSERT_LT(first_thunk + 8U, repaired.size());
+    std::string dll_name(reinterpret_cast<const char*>(repaired.data() + name_rva), 8);
+    dll_name.resize(dll_name.find('\0'));
+    // The module identity is the snapshot world's own Ldr BaseDllName
+    // ("fake" - the crafted entry carries no .dll suffix); no host catalog
+    // module can supply it.
+    EXPECT_EQ(dll_name, "fake");
+    // The bound thunk was rewritten to an in-image hint/name record carrying
+    // the world-resolved function name (the raw absolute VA is gone).
+    const auto r64 = [&repaired](const std::size_t at) {
+        std::uint64_t value = 0;
+        for (std::size_t i = 0; i < 8; ++i) {
+            value |= static_cast<std::uint64_t>(repaired[at + i]) << (8 * i);
+        }
+        return value;
+    };
+    const auto thunk = r64(first_thunk);
+    EXPECT_NE(thunk, kFakeExportVa) << "the absolute world VA survived the repair";
+    ASSERT_LT(thunk, repaired.size());
+    ASSERT_LT(thunk + 2U + 11U, repaired.size()); // hint word + "fake_export"
+    EXPECT_EQ(repaired[thunk], 0);
+    EXPECT_EQ(repaired[thunk + 1], 0);
+    EXPECT_EQ(std::memcmp(repaired.data() + thunk + 2, "fake_export", 11), 0)
+        << "the repaired thunk's name record does not carry the world's export name";
+}
+
+// OEP stamp route symmetry: the oep-candidate sequence is one of the pinned
+// equivalent inputs, so both container forms stamp the first candidate inside
+// a repaired region into AddressOfEntryPoint and report it - the same
+// mechanism that wrote 0x53eb8 into the capture product - with byte-identical
+// copies and a non-matching candidate applying nothing.
+TEST_F(RepairDumpEnv, OepStampSymmetricAcrossContainerForms)
+{
+    auto snapshot_bytes = read_whole(snapshot_);
+    ASSERT_FALSE(snapshot_bytes.empty());
+    constexpr std::uint64_t kCompleteBase = 0x40000000;
+    const std::vector<std::uint64_t> oep_candidates{kCompleteBase + 0x1234};
+
+    const auto out_path = dir_ / "out_oep_path";
+    const auto out_bytes = dir_ / "out_oep_bytes";
+    const auto by_path = unpack::repair_dump(snapshot_, dump_, out_path, oep_candidates);
+    ASSERT_TRUE(by_path.has_value());
+    const auto by_bytes = unpack::repair_dump(snapshot_bytes, dump_, out_bytes, oep_candidates);
+    ASSERT_TRUE(by_bytes.has_value());
+    expect_summaries_equal(*by_path, *by_bytes);
+    expect_same_output_trees(out_path, out_bytes);
+
+    ASSERT_TRUE(by_path->oep_found);
+    EXPECT_EQ(by_path->oep_va, kCompleteBase + 0x1234U);
+    EXPECT_EQ(by_path->oep_rva, 0x1234U);
+    // The stamp landed in both copies' optional header (AddressOfEntryPoint,
+    // optional + 0x10): file offset == RVA in the header region.
+    for (const auto* dir : {&out_path, &out_bytes}) {
+        const auto image = read_whole(*dir / "repaired_0000000040000000.exe");
+        ASSERT_GE(image.size(), 0x100U);
+        const auto e_lfanew =
+            static_cast<std::size_t>(image[0x3C]) | (static_cast<std::size_t>(image[0x3D]) << 8);
+        const auto entry = static_cast<std::uint32_t>(image[e_lfanew + 0x18 + 0x10]) |
+                           (static_cast<std::uint32_t>(image[e_lfanew + 0x18 + 0x11]) << 8) |
+                           (static_cast<std::uint32_t>(image[e_lfanew + 0x18 + 0x12]) << 16) |
+                           (static_cast<std::uint32_t>(image[e_lfanew + 0x18 + 0x13]) << 24);
+        EXPECT_EQ(entry, 0x1234U) << *dir;
+    }
+
+    // A candidate outside every repaired region applies nothing (the
+    // not-image region at 0x50000000 never produces a copy to stamp).
+    const auto out_miss = dir_ / "out_oep_miss";
+    const auto miss =
+        unpack::repair_dump(snapshot_, dump_, out_miss, std::vector<std::uint64_t>{0x7F000000});
+    ASSERT_TRUE(miss.has_value());
+    EXPECT_FALSE(miss->oep_found);
+    EXPECT_EQ(miss->oep_va, 0U);
+    EXPECT_EQ(miss->oep_rva, 0U);
+    // Its region verdicts equal the stamped run's; the complete region's copy
+    // differs from the stamped one exactly by the entry-point field (all four
+    // bytes of it - whatever the pre-stamp value was).
+    expect_regions_equal(miss->regions, by_path->regions);
+    const auto baseline = read_whole(out_miss / "repaired_0000000040000000.exe");
+    auto stamped = read_whole(out_path / "repaired_0000000040000000.exe");
+    ASSERT_EQ(baseline.size(), stamped.size());
+    const auto e_lf =
+        static_cast<std::size_t>(stamped[0x3C]) | (static_cast<std::size_t>(stamped[0x3D]) << 8);
+    constexpr std::size_t kEntryField = 0x18 + 0x10; // optional header + AddressOfEntryPoint
+    for (std::size_t i = 0; i < 4; ++i) {
+        stamped[e_lf + kEntryField + i] = baseline[e_lf + kEntryField + i];
+    }
+    EXPECT_EQ(baseline, stamped) << "only the AddressOfEntryPoint field may differ";
 }
 
 #ifdef _WIN32

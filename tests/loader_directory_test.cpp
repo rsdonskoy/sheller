@@ -11,6 +11,7 @@
 #endif
 #include "../src/api/wiring.h"
 #include "boundary_fixture.h"
+#include "guest_objects.h"
 
 #include "boundary_manifest.h"
 #include "boundary_metadata.h"
@@ -232,6 +233,111 @@ TEST(LoaderDirectory, SourceTableTiersTheDirectory)
     // and the closure-pulled member is actually mapped
     const auto linked_base = built->map.module_index_by_name("linked.dll");
     ASSERT_TRUE(linked_base.has_value());
+}
+
+// ---- run-time section views: the directory world serves its own bytes ------
+
+TEST(LoaderDirectory, KnownDllViewServesDirectoryBytesNotHostBytes)
+{
+    // the resident kernel32 is the directory's real-byte fixture. Opening
+    // \KnownDlls\kernel32.dll in the constructed world and pinning the view
+    // byte-for-byte against the directory-derived expectation proves the
+    // run-time view service derives from the world's resident module: on a
+    // host whose own System32 differs from the directory (every real host)
+    // that equality is the no-host-read proof, the loader-env invariant the
+    // construction side already carries.
+    const auto kernel32_source = make_importing_source(
+        {{"SampleExport", nullptr, sheller_test::kBoundaryTextRva, {0x31, 0xC0, 0xC3}, {}}},
+        {{"ntdll.dll", {"NtCreateFile"}}});
+    const auto dir = make_directory("viewbytes", {{"kernel32.dll", kernel32_source}});
+    auto built = sheller::engine::prepare_pe_file(kSamplePath, false, kSynthDir, dir, true);
+    ASSERT_TRUE(built.has_value()) << rejection_detail(built);
+    const auto index = built->map.module_index_by_name("kernel32.dll");
+    ASSERT_TRUE(index.has_value());
+    const auto& module = built->map.module(*index);
+
+    // the run-time call structures ride a scratch span clear of the world
+    constexpr std::uint64_t kScratch = 0x10000000000;
+    constexpr std::uint64_t kViewBase = 0x10000010000;
+    auto* uc = built->unicorn.get();
+    ASSERT_EQ(uc_mem_map(uc, kScratch, 0x20000, UC_PROT_ALL), UC_ERR_OK);
+
+    const std::string text = "\\KnownDlls\\kernel32.dll";
+    std::vector<std::uint8_t> text_bytes;
+    for (const char c : text) {
+        text_bytes.push_back(static_cast<std::uint8_t>(c));
+        text_bytes.push_back(0);
+    }
+    uc_mem_write(uc, kScratch, text_bytes.data(), text_bytes.size());
+    struct UnicodeString {
+        std::uint16_t length;
+        std::uint16_t maximum;
+        std::uint32_t pad;
+        std::uint64_t buffer;
+    } name{};
+    name.length = static_cast<std::uint16_t>(text_bytes.size());
+    name.maximum = name.length;
+    name.buffer = kScratch;
+    uc_mem_write(uc, kScratch + 0x100, &name, sizeof name);
+    const std::uint64_t unicode_ptr = kScratch + 0x100;
+    uc_mem_write(uc, kScratch + 0x300 + 0x10, &unicode_ptr,
+                 sizeof unicode_ptr); // OBJATTR.ObjectName
+
+    sheller::engine::SyscallRunState state;
+    state.uc = uc;
+    state.guest_mode = sheller::engine::GuestMode::kX64;
+    state.region_map = &built->map;
+
+    sheller::syscalls::SyscallFrame frame{};
+    sheller::syscalls::SyscallOutcome outcome;
+    outcome.section_objattr = kScratch + 0x300;
+    outcome.section_handle_out = kScratch + 0x400;
+    sheller::engine::apply_open_section(state, uc, frame, outcome);
+    ASSERT_EQ(outcome.status, 0u);
+    std::uint64_t handle = 0;
+    uc_mem_read(uc, kScratch + 0x400, &handle, sizeof handle);
+    ASSERT_NE(handle, 0u);
+
+    uc_mem_write(uc, kScratch + 0x500, &kViewBase, sizeof kViewBase);
+    const std::uint64_t zero = 0;
+    uc_mem_write(uc, kScratch + 0x508, &zero, sizeof zero);
+    outcome = sheller::syscalls::SyscallOutcome{};
+    outcome.map_view_handle = handle;
+    outcome.map_view_base_ptr = kScratch + 0x500;
+    outcome.map_view_size_ptr = kScratch + 0x508;
+    sheller::engine::apply_map_view_of_section(state, uc, frame, outcome);
+    ASSERT_EQ(outcome.status, 0u);
+    std::uint64_t answered = 0;
+    uc_mem_read(uc, kScratch + 0x500, &answered, sizeof answered);
+    EXPECT_EQ(answered, kViewBase);
+
+    // the expectation, recomputed from the directory world's own resident
+    // bytes: this-base relocation delta, the hygiene zeroings (CheckSum and
+    // the Security directory entry), the compat stub in the tail page - the
+    // fixture carries no FF 25 thunk, so nothing gets repointed
+    std::vector<std::uint8_t> expected(module.size, std::uint8_t{0});
+    ASSERT_EQ(uc_mem_read(uc, module.base, expected.data(), expected.size()), UC_ERR_OK);
+    const auto info = sheller::loader::parse_pe(expected);
+    ASSERT_TRUE(info.has_value());
+    static_cast<void>(sheller::loader::apply_relocations(expected, *info, kViewBase - module.base));
+    const auto e_lfanew = static_cast<std::size_t>(expected[0x3C]) |
+                          (static_cast<std::size_t>(expected[0x3D]) << 8) |
+                          (static_cast<std::size_t>(expected[0x3E]) << 16) |
+                          (static_cast<std::size_t>(expected[0x3F]) << 24);
+    const auto optional = e_lfanew + 0x18;
+    for (std::size_t i = 0; i < 4; ++i) {
+        expected[optional + 0x40 + i] = 0;             // CheckSum
+        expected[optional + 0x70 + 4 * 8 + i] = 0;     // Security VA
+        expected[optional + 0x70 + 4 * 8 + 4 + i] = 0; // Security size
+    }
+    const std::uint8_t stub[9] = {0xC7, 0x02, 0x00, 0x00, 0x00, 0x00, 0x31, 0xC0, 0xC3};
+    std::memcpy(expected.data() + expected.size() - 0x20, stub, sizeof stub);
+
+    std::vector<std::uint8_t> view(expected.size(), std::uint8_t{0xAA});
+    ASSERT_EQ(uc_mem_read(uc, kViewBase, view.data(), view.size()), UC_ERR_OK);
+    for (std::size_t i = 0; i < expected.size(); ++i) {
+        ASSERT_EQ(view[i], expected[i]) << "byte " << std::hex << i;
+    }
 }
 
 TEST(LoaderDirectory, SyntheticRouteStaysUnmarked)

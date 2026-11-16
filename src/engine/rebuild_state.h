@@ -386,12 +386,22 @@ struct PreparedGuest {
 // reused within a run.
 struct SectionObject {
     std::uint64_t view_size{};
-    std::array<char, 48> name{};       // folded; empty = anonymous
-    bool known_dll{};                  // host content backfill attempted at map time
-    std::vector<std::uint8_t> content; // built image bytes (KnownDLL only)
+    std::array<char, 48> name{}; // folded; empty = anonymous
+    bool known_dll{};            // world-sourced content backfill attempted at map time
+    // The matched resident module's region-map index, bound at open time -
+    // the stable identity the backfill resolves. A folded-name re-match
+    // would silently miss 48-63 character names truncated by the field
+    // above (ModuleRecord holds 64). kNoModuleIndex when unset.
+    std::size_t module_index{mem_region::kNoModuleIndex};
+    // The transform-free content stage every view product is computed
+    // from: KnownDLL sections cache the resident module's page-wise guest
+    // copy (the world's own bytes), file-backed sections the loader-built
+    // image. Each mapping relocates and hygienes a fresh scratch of this
+    // stage for its own view base - the transformed result is never cached
+    // (a second mapping must not inherit the first base's bytes).
+    std::vector<std::uint8_t> pristine_image;
     // File-backed creates carry the bound host file's
-    // raw bytes; the map builds (and relocates) the image from these instead
-    // of the System32 name lookup the KnownDLL backfill uses.
+    // raw bytes; the map builds the pristine stage from these.
     std::vector<std::uint8_t> source_bytes;
 };
 

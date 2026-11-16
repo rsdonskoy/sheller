@@ -507,6 +507,21 @@ sheller_apply_common(syscall_number_map_test)
 
 add_test(NAME syscall_number_map COMMAND syscall_number_map_test)
 
+# KnownDLL section views: the world-sourced backfill
+# contract - byte-pinned against an independent expectation over a
+# hand-built guest (fixture resident module + region map); no host
+# system-directory read exists on any platform. Portable by design.
+add_executable(known_dll_view_test known_dll_view_test.cpp)
+target_include_directories(known_dll_view_test PRIVATE
+  "${CMAKE_CURRENT_SOURCE_DIR}/../src/engine"
+  "${CMAKE_CURRENT_SOURCE_DIR}/../src/loader")
+target_include_directories(known_dll_view_test SYSTEM PRIVATE
+  ${SHELLER_UNICORN_INCLUDE_DIR})
+target_link_libraries(known_dll_view_test PRIVATE GTest::gtest_main sheller_engine)
+sheller_apply_common(known_dll_view_test)
+
+add_test(NAME known_dll_view COMMAND known_dll_view_test)
+
 # Write ledger + raw region dump tests: ledger semantics, dump
 # determinism, and a live-uc export byte check - portable by design.
 add_executable(write_ledger_test write_ledger_test.cpp)
@@ -960,6 +975,13 @@ endif()
   add_test(NAME world_diff COMMAND world_diff_test)
   add_test(NAME world_diff_regression
     COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/world_diff_regression.py")
+
+  # Product-level parity diff (tools/product_diff.py): verified-identity
+  # cause classification over synthetic image-form product pairs - the two
+  # world-binding shapes, the five recovery-content negative shapes, the two
+  # cause-uncertain shapes, exit-code agreement, and the named rejections.
+  add_test(NAME product_diff_regression
+    COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/product_diff_regression.py")
 
   # Equivalence-baseline machine adjudication (accepted-residuals gate):
   # the happy path, unaccepted classes, scale-cap overruns and structural

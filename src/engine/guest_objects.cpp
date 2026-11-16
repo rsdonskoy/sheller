@@ -86,6 +86,143 @@ bool read_section_object_name(SyscallRunState& state, uc_engine* const uc,
     return !folded.empty();
 }
 
+// Header-span pre-validation ahead of parse_pe: the parser bounds-checks
+// only the DOS header and the PE signature/COFF block - past the magic
+// check its reads sit at fixed optional-header offsets, and the
+// attacker-controlled SizeOfOptionalHeader picks the section-table base.
+// Both content paths consult this before parsing; a rejected header keeps
+// the fail-soft answer (zero-filled view) and the hostile bytes never
+// reach the unbounded reads.
+bool image_headers_within(const std::vector<std::uint8_t>& bytes)
+{
+    if (bytes.size() < 0x58) { // DOS header + PE signature + COFF block
+        return false;
+    }
+    const auto read16 = [&bytes](const std::size_t offset) {
+        return static_cast<std::uint16_t>(bytes[offset] |
+                                          (static_cast<std::uint16_t>(bytes[offset + 1]) << 8));
+    };
+    const auto read32 = [&bytes](const std::size_t offset) {
+        std::uint32_t value = 0;
+        std::memcpy(&value, bytes.data() + offset, sizeof value);
+        return value;
+    };
+    const auto e_lfanew = read32(0x3C);
+    if (e_lfanew < 4 + 20 || e_lfanew + 0x18 > bytes.size()) {
+        return false;
+    }
+    const auto optional = static_cast<std::uint64_t>(e_lfanew) + 0x18;
+    const auto magic = read16(static_cast<std::size_t>(optional));
+    // the optional header must cover the data-directory array parse_pe and
+    // the hygiene helper read: directory[9] ends at optional+0xC0 (PE32+)
+    // and optional+0xB0 (PE32); real images carry the full 0xF0/0xE0
+    const auto minimum_optional =
+        magic == 0x20B ? 0xC0U : (magic == 0x10B ? 0xB0U : 0U); // unknown magic: reject
+    const auto optional_size = read16(static_cast<std::size_t>(e_lfanew) + 0x14);
+    if (minimum_optional == 0 || optional_size < minimum_optional) {
+        return false;
+    }
+    const auto sections = read16(static_cast<std::size_t>(e_lfanew) + 6);
+    const auto table_end = optional + optional_size + static_cast<std::uint64_t>(sections) * 40;
+    return table_end <= bytes.size();
+}
+
+// The two hygiene zeroings, located by the image's own bitness: the
+// CheckSum (optional header +0x40) no longer describes rebuilt or
+// relocated byte layout, and the Security (Authenticode) data-directory
+// entry carries nothing the replay verifies (in a built view it reads past
+// the mapping). The data-directory array starts at optional+0x70 for PE32+
+// and optional+0x60 for PE32 - a fixed 0x70 cleared the wrong directory on
+// PE32 images, and a fixed optional-header base missed the +0x18 and
+// zeroed SizeOfInitializedData instead of the CheckSum. Bounds-checked,
+// fail-soft.
+void zero_validation_fields(std::vector<std::uint8_t>& image)
+{
+    if (image.size() < 0x5A) { // e_lfanew plus the magic slot
+        return;
+    }
+    const auto e_lfanew = static_cast<std::uint64_t>(image[0x3C]) |
+                          (static_cast<std::uint64_t>(image[0x3D]) << 8) |
+                          (static_cast<std::uint64_t>(image[0x3E]) << 16) |
+                          (static_cast<std::uint64_t>(image[0x3F]) << 24);
+    const auto optional = e_lfanew + 0x18;
+    if (optional + 2 > image.size()) {
+        return;
+    }
+    const auto magic = static_cast<std::uint16_t>(
+        image[static_cast<std::size_t>(optional)] |
+        (static_cast<std::uint16_t>(image[static_cast<std::size_t>(optional) + 1]) << 8));
+    if (magic != 0x20B && magic != 0x10B) {
+        return;
+    }
+    const auto directory_base = optional + (magic == 0x20B ? 0x70U : 0x60U);
+    if (optional + 0x40 + 4 <= image.size()) {
+        const std::array<std::uint8_t, 4> zero_checksum{};
+        std::memcpy(image.data() + optional + 0x40, zero_checksum.data(), zero_checksum.size());
+    }
+    constexpr auto kSecurityEntry = 4 * 8; // DataDirectory[4]
+    if (directory_base + kSecurityEntry + 8 <= image.size()) {
+        const std::array<std::uint8_t, 8> zero_dir{};
+        std::memcpy(image.data() + directory_base + kSecurityEntry, zero_dir.data(),
+                    zero_dir.size());
+    }
+}
+
+// Build the pristine image stage from a bound host file's raw bytes: the
+// loader's own mapper output, left unrelocated - every mapping relocates a
+// fresh scratch for its view base (the kernel's memory manager does the
+// same when mapping an image section at a non-preferred base; skipping it
+// leaves stale absolute pointers that make real CRT/loader code write
+// through wrong addresses). Pure loader-library code on every host and
+// fail-soft: malformed bytes leave the stage empty (the view stays
+// zero-filled and the loader's image validation fails the load cleanly).
+void build_image_content(SectionObject& section)
+{
+    if (!image_headers_within(section.source_bytes)) {
+        return;
+    }
+    const auto info = loader::parse_pe(section.source_bytes);
+    if (!info) {
+        return;
+    }
+    auto image = loader::build_image(section.source_bytes, *info);
+    if (!image) {
+        return;
+    }
+    section.pristine_image = std::move(*image);
+}
+
+// KnownDLL views carry the world's own image: the matched resident
+// module's mapped bytes, read page-wise from guest memory through the
+// module identity bound at open time. A failed page read (unmapped or
+// content-absent in a sparse captured world) keeps the zeroed page -
+// exactly what the world itself shows at that address. No host system
+// directory is consulted on any host: the copy is the world's truth on
+// every route. Fail-soft: an absent module or a header span that fails the
+// pre-validation leaves the stage empty (zero-filled view, run intact).
+void backfill_section_content(SyscallRunState& state, SectionObject& section)
+{
+    if (state.region_map == nullptr || section.module_index >= state.region_map->module_count()) {
+        return;
+    }
+    const auto& module = state.region_map->module(section.module_index);
+    if (module.base == 0 || module.size == 0 || module.size > kMaxSectionBytes) {
+        return;
+    }
+    std::vector<std::uint8_t> copy(static_cast<std::size_t>(module.size), std::uint8_t{0});
+    for (std::uint64_t offset = 0; offset < module.size; offset += 0x1000) {
+        const auto page =
+            static_cast<std::size_t>((std::min<std::uint64_t>)(0x1000, module.size - offset));
+        // a failed page read keeps the zeroed page (the world's own answer
+        // at an unmapped or content-absent address)
+        static_cast<void>(uc_mem_read(state.uc, module.base + offset, copy.data() + offset, page));
+    }
+    if (!image_headers_within(copy)) {
+        return;
+    }
+    section.pristine_image = std::move(copy);
+}
+
 } // namespace
 
 void apply_open_section(SyscallRunState& state, uc_engine* uc,
@@ -102,6 +239,7 @@ void apply_open_section(SyscallRunState& state, uc_engine* uc,
         if (std::string_view(module.name.data()) == folded) {
             SectionObject object;
             object.view_size = module.size;
+            object.module_index = i; // stable identity: survives name truncation below
             const auto name_bytes = (std::min)(folded.size(), object.name.size() - 1);
             std::memcpy(object.name.data(), folded.data(), name_bytes);
             object.known_dll = true;
@@ -144,6 +282,13 @@ void apply_create_section(SyscallRunState& state, uc_engine* uc,
             return;
         }
         const auto& file_bytes = state.files[file_index].content;
+        // header-span pre-validation before the parse: parse_pe reads at
+        // fixed optional-header offsets and lets SizeOfOptionalHeader pick
+        // the section-table base - reject the hostile shapes first
+        if (!image_headers_within(file_bytes)) {
+            outcome.status = syscalls::kStatusInvalidParameter;
+            return;
+        }
         const auto info = loader::parse_pe(file_bytes);
         if (!info || info->image_size == 0 || info->image_size > kMaxSectionBytes) {
             outcome.status = syscalls::kStatusInvalidParameter;
@@ -169,89 +314,6 @@ void apply_create_section(SyscallRunState& state, uc_engine* uc,
 
 namespace {
 
-// Build the mapped-view image bytes from a host file's raw bytes: build with
-// the loader's own mapper and RELOCATE for the actual view base - the
-// kernel's memory manager does the same when mapping an image section at a
-// non-preferred base; skipping it leaves stale absolute pointers that make
-// real CRT/loader code write through wrong addresses. Windows-only and
-// fail-soft - malformed bytes leave the content empty (the view stays
-// zero-filled and the loader's image validation fails the load cleanly).
-void build_image_content(SectionObject& section, const std::vector<std::uint8_t>& bytes,
-                         const std::uint64_t view_base)
-{
-#ifdef _WIN32
-    const auto info = loader::parse_pe(bytes);
-    if (!info) {
-        return;
-    }
-    auto image = loader::build_image(bytes, *info);
-    if (!image) {
-        return;
-    }
-    const auto base_delta = view_base - info->image_base;
-    if (base_delta != 0) {
-        static_cast<void>(loader::apply_relocations(*image, *info, base_delta));
-    }
-    section.content = std::move(*image);
-    // Two rebuilt-image hygiene fixes the loader's deep validation trips
-    // over with STATUS_INVALID_IMAGE_FORMAT:
-    // - the file's CheckSum no longer describes the rebuilt byte layout -
-    //   zero it so the comparison is skipped;
-    // - the Security directory (Authenticode signature) lives past
-    //   SizeOfImage in the FILE and is not part of the built view - a
-    //   non-empty entry reads past the mapping. Zero it; nothing in the
-    //   replay verifies signatures.
-    if (section.content.size() > 0x40 + 4) {
-        const auto e_lfanew = static_cast<std::uint64_t>(section.content[0x3c]) |
-                              (static_cast<std::uint64_t>(section.content[0x3d]) << 8) |
-                              (static_cast<std::uint64_t>(section.content[0x3e]) << 16) |
-                              (static_cast<std::uint64_t>(section.content[0x3f]) << 24);
-        if (e_lfanew + 0x40 + 4 <= section.content.size()) {
-            const std::array<std::uint8_t, 4> zero_checksum{};
-            std::memcpy(section.content.data() + e_lfanew + 0x40, zero_checksum.data(), 4);
-        }
-        constexpr auto kSecurityDirOffset = 0x18 + 0x70 + 4 * 8; // opt + DataDirectory[4]
-        if (e_lfanew + kSecurityDirOffset + 8 <= section.content.size()) {
-            const std::array<std::uint8_t, 8> zero_dir{};
-            std::memcpy(section.content.data() + e_lfanew + kSecurityDirOffset, zero_dir.data(),
-                        zero_dir.size());
-        }
-    }
-#else
-    (void)section;
-    (void)bytes;
-    (void)view_base;
-#endif
-}
-
-// KnownDLL views carry real content: the host's DLL image looked up by the
-// section's folded name in the host system directory.
-void backfill_section_content(SyscallRunState& state, SectionObject& section,
-                              const std::uint64_t view_base)
-{
-#ifdef _WIN32
-    char system_root[MAX_PATH] = {};
-    const auto len = state.guest_mode == GuestMode::kX86
-                         ? GetSystemWow64DirectoryA(system_root, sizeof system_root)
-                         : GetSystemDirectoryA(system_root, sizeof system_root);
-    if (len == 0) {
-        return;
-    }
-    const auto dll_path = std::filesystem::path(system_root) / std::string(section.name.data());
-    std::ifstream in(dll_path, std::ios::binary);
-    if (!in) {
-        return;
-    }
-    std::vector<std::uint8_t> bytes{std::istreambuf_iterator<char>(in),
-                                    std::istreambuf_iterator<char>()};
-    build_image_content(section, bytes, view_base);
-#else
-    (void)state;
-    (void)view_base;
-    (void)section;
-#endif
-}
-
 // Foreign-thunk DLLs (kernel.appcore.dll and its kin export
 // `jmp qword ptr [rip+disp]` thunks whose target slots the system loader
 // patches at real load time from outside the file) can never execute from
@@ -261,27 +323,28 @@ void backfill_section_content(SyscallRunState& state, SectionObject& section,
 // S_OK with the classic enum value - for AppPolicyGetProcessTerminationMethod
 // that is 1 (ExitProcess), the value ucrt's exit path requires to flush
 // stdio instead of TerminateProcess. The stub rides in the final page's
-// relocation padding, inside the view, and each unbound slot is repointed at
-// it. Runs after the built image is in guest memory (the export walk reads
-// the mapped view).
-void patch_foreign_thunks(SyscallRunState& state, SectionObject& section,
-                          const std::uint64_t view_base)
+// relocation padding, inside the view, and each unbound slot is repointed
+// at it. Runs after the view bytes are in guest memory (the export walk
+// reads the mapped view); the view span bounds the slot rewrite. x64 only
+// - the compat surface it answers lives in x64 worlds.
+void patch_foreign_thunks(SyscallRunState& state, const std::uint64_t view_base,
+                          const std::size_t image_span)
 {
-    if (state.guest_mode != GuestMode::kX64 || section.content.size() < 0x20) {
+    if (state.guest_mode != GuestMode::kX64 || image_span < 0x20) {
         return;
     }
-    const auto stub_offset = section.content.size() - 0x20;
+    const auto stub_offset = image_span - 0x20;
     const std::array<std::uint8_t, 9> desktop_stub = {0xC7, 0x02, 0x00, 0x00, 0x00,
                                                       0x00,       // mov dword ptr [rdx], 0
                                                       0x31, 0xC0, // xor eax, eax
                                                       0xC3};      // ret
-    std::memcpy(section.content.data() + stub_offset, desktop_stub.data(), desktop_stub.size());
     uc_mem_write(state.uc, view_base + stub_offset, desktop_stub.data(), desktop_stub.size());
     for (const auto& export_entry : syscalls::enumerate_exports(state.uc, view_base)) {
         std::array<std::uint8_t, 6> thunk{};
         if (uc_mem_read(state.uc, export_entry.address, thunk.data(), thunk.size()) != UC_ERR_OK ||
             thunk[0] != 0xFF || thunk[1] != 0x25) {
-            continue; // not an unbound rip-relative thunk
+            continue; // not an unbound rip-relative thunk (a bound-shape
+                      // export - the loader rewrote it - escapes untouched)
         }
         std::int32_t disp = 0;
         for (std::size_t i = 0; i < 4; ++i) {
@@ -289,12 +352,11 @@ void patch_foreign_thunks(SyscallRunState& state, SectionObject& section,
         }
         const auto slot_va = export_entry.address + 6 + static_cast<std::uint64_t>(disp);
         const auto slot_rva = slot_va - view_base;
-        if (slot_va < view_base || slot_rva >= section.content.size()) {
+        if (slot_va < view_base || slot_rva >= image_span) {
             continue;
         }
         const auto stub_va = view_base + stub_offset;
         uc_mem_write(state.uc, slot_va, &stub_va, sizeof stub_va);
-        std::memcpy(section.content.data() + slot_rva, &stub_va, sizeof stub_va);
     }
 }
 
@@ -347,17 +409,43 @@ void apply_map_view_of_section(SyscallRunState& state, uc_engine* uc,
         }
         state.valloc_cursor = base + section->view_size;
     }
-    if (section->known_dll && section->content.empty() && !section->name.empty()) {
-        backfill_section_content(state, *section, base);
+    if (section->known_dll && section->pristine_image.empty()) {
+        backfill_section_content(state, *section);
     }
-    if (section->content.empty() && !section->source_bytes.empty()) {
-        build_image_content(*section, section->source_bytes, base);
+    if (section->pristine_image.empty() && !section->source_bytes.empty()) {
+        build_image_content(*section);
     }
-    if (!section->content.empty()) {
+    // The per-view product, computed fresh from the pristine stage: this
+    // base's additive relocation delta plus the hygiene zeroings. The
+    // relocated result is never cached - a second mapping of the same
+    // handle relocates for its own base instead of inheriting the first
+    // one's absolute pointers. The delta source differs by stage: a
+    // resident copy's slots hold the module base the loader relocated it
+    // to, a built image's slots hold the preferred ImageBase.
+    std::vector<std::uint8_t> view_bytes;
+    if (!section->pristine_image.empty()) {
+        auto scratch = section->pristine_image;
+        const auto info = loader::parse_pe(scratch);
+        if (info.has_value()) {
+            std::uint64_t delta = 0;
+            if (section->known_dll && state.region_map != nullptr &&
+                section->module_index < state.region_map->module_count()) {
+                delta = base - state.region_map->module(section->module_index).base;
+            } else {
+                delta = base - info->image_base;
+            }
+            if (delta != 0) {
+                static_cast<void>(loader::apply_relocations(scratch, *info, delta));
+            }
+            zero_validation_fields(scratch);
+            view_bytes = std::move(scratch);
+        }
+    }
+    if (!view_bytes.empty()) {
         const auto content_bytes =
-            (std::min)(section->content.size(), static_cast<std::size_t>(section->view_size));
-        uc_mem_write(uc, base, section->content.data(), content_bytes);
-        patch_foreign_thunks(state, *section, base);
+            (std::min)(view_bytes.size(), static_cast<std::size_t>(section->view_size));
+        uc_mem_write(uc, base, view_bytes.data(), content_bytes);
+        patch_foreign_thunks(state, base, view_bytes.size());
     } else {
         // commit semantics: fresh reservations may hold stale bytes, views
         // are zero-filled
