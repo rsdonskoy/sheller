@@ -507,6 +507,21 @@ sheller_apply_common(syscall_number_map_test)
 
 add_test(NAME syscall_number_map COMMAND syscall_number_map_test)
 
+# KnownDLL section views: the world-sourced backfill
+# contract - byte-pinned against an independent expectation over a
+# hand-built guest (fixture resident module + region map); no host
+# system-directory read exists on any platform. Portable by design.
+add_executable(known_dll_view_test known_dll_view_test.cpp)
+target_include_directories(known_dll_view_test PRIVATE
+  "${CMAKE_CURRENT_SOURCE_DIR}/../src/engine"
+  "${CMAKE_CURRENT_SOURCE_DIR}/../src/loader")
+target_include_directories(known_dll_view_test SYSTEM PRIVATE
+  ${SHELLER_UNICORN_INCLUDE_DIR})
+target_link_libraries(known_dll_view_test PRIVATE GTest::gtest_main sheller_engine)
+sheller_apply_common(known_dll_view_test)
+
+add_test(NAME known_dll_view COMMAND known_dll_view_test)
+
 # Write ledger + raw region dump tests: ledger semantics, dump
 # determinism, and a live-uc export byte check - portable by design.
 add_executable(write_ledger_test write_ledger_test.cpp)

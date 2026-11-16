@@ -124,8 +124,10 @@ four-kind classification, the counting whitelist, compat answers) ride an
 address-level runtime table; image rewrites are limited to an explicit
 whitelist - the reserved DOS `e_res2` marker slot, data-export slots whose
 mapped bytes are free, and manifest-defined stub bodies. The host's system
-directories are never read. You supply the DLLs; their license is your
-responsibility.
+directories are never read - not at construction and not at run time: a
+`\KnownDlls\<name>` section view served during the run carries the world's
+own resident image bytes (relocated for the view base), on every host. You
+supply the DLLs; their license is your responsibility.
 
 Strictness is the contract: a closure member the directory lacks is a named
 construction rejection, and `--system-modules-fallback` opts into pulling such
