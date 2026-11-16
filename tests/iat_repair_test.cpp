@@ -637,8 +637,8 @@ void expect_same_output_trees(const fs::path& a_dir, const fs::path& b_dir)
 // Field-by-field structural equality of two thunk lists (UncoveredThunk is
 // an aggregate without a synthesized operator==).
 void expect_thunk_lists_equal(const std::vector<unpack::UncoveredThunk>& a,
-                              const std::vector<unpack::UncoveredThunk>& b,
-                              const char* what, const std::size_t region)
+                              const std::vector<unpack::UncoveredThunk>& b, const char* what,
+                              const std::size_t region)
 {
     ASSERT_EQ(a.size(), b.size()) << what << " region " << region;
     for (std::size_t i = 0; i < a.size(); ++i) {
@@ -692,11 +692,11 @@ TEST_F(RepairDumpEnv, EquivalentContainerFormsRepairIdentically)
 
     const auto out_bytes = dir_ / "out_bytes";
     const auto by_path = unpack::repair_dump(snapshot_, dump_, out_);
-    ASSERT_TRUE(by_path.has_value()) << "path-form repair error="
-                                     << static_cast<int>(by_path.error());
+    ASSERT_TRUE(by_path.has_value())
+        << "path-form repair error=" << static_cast<int>(by_path.error());
     const auto by_bytes = unpack::repair_dump(snapshot_bytes, dump_, out_bytes);
-    ASSERT_TRUE(by_bytes.has_value()) << "bytes-form repair error="
-                                      << static_cast<int>(by_bytes.error());
+    ASSERT_TRUE(by_bytes.has_value())
+        << "bytes-form repair error=" << static_cast<int>(by_bytes.error());
     expect_summaries_equal(*by_path, *by_bytes);
     expect_same_output_trees(out_, out_bytes);
 
@@ -796,8 +796,8 @@ TEST_F(RepairDumpEnv, OepStampSymmetricAcrossContainerForms)
     for (const auto* dir : {&out_path, &out_bytes}) {
         const auto image = read_whole(*dir / "repaired_0000000040000000.exe");
         ASSERT_GE(image.size(), 0x100U);
-        const auto e_lfanew = static_cast<std::size_t>(image[0x3C]) |
-                              (static_cast<std::size_t>(image[0x3D]) << 8);
+        const auto e_lfanew =
+            static_cast<std::size_t>(image[0x3C]) | (static_cast<std::size_t>(image[0x3D]) << 8);
         const auto entry = static_cast<std::uint32_t>(image[e_lfanew + 0x18 + 0x10]) |
                            (static_cast<std::uint32_t>(image[e_lfanew + 0x18 + 0x11]) << 8) |
                            (static_cast<std::uint32_t>(image[e_lfanew + 0x18 + 0x12]) << 16) |
@@ -808,8 +808,8 @@ TEST_F(RepairDumpEnv, OepStampSymmetricAcrossContainerForms)
     // A candidate outside every repaired region applies nothing (the
     // not-image region at 0x50000000 never produces a copy to stamp).
     const auto out_miss = dir_ / "out_oep_miss";
-    const auto miss = unpack::repair_dump(snapshot_, dump_, out_miss,
-                                          std::vector<std::uint64_t>{0x7F000000});
+    const auto miss =
+        unpack::repair_dump(snapshot_, dump_, out_miss, std::vector<std::uint64_t>{0x7F000000});
     ASSERT_TRUE(miss.has_value());
     EXPECT_FALSE(miss->oep_found);
     EXPECT_EQ(miss->oep_va, 0U);
@@ -821,8 +821,8 @@ TEST_F(RepairDumpEnv, OepStampSymmetricAcrossContainerForms)
     const auto baseline = read_whole(out_miss / "repaired_0000000040000000.exe");
     auto stamped = read_whole(out_path / "repaired_0000000040000000.exe");
     ASSERT_EQ(baseline.size(), stamped.size());
-    const auto e_lf = static_cast<std::size_t>(stamped[0x3C]) |
-                      (static_cast<std::size_t>(stamped[0x3D]) << 8);
+    const auto e_lf =
+        static_cast<std::size_t>(stamped[0x3C]) | (static_cast<std::size_t>(stamped[0x3D]) << 8);
     constexpr std::size_t kEntryField = 0x18 + 0x10; // optional header + AddressOfEntryPoint
     for (std::size_t i = 0; i < 4; ++i) {
         stamped[e_lf + kEntryField + i] = baseline[e_lf + kEntryField + i];
